@@ -1936,6 +1936,103 @@ class NexusBot(discord.Client):
                         await log_to_db('info', f'{message.author} added <@{uid}> to blacklist')
                 return
 
+    async def on_message_delete(self, message):
+        if not message.guild or message.author.bot:
+            return
+        try:
+            log_ch = await get_general_log_channel(message.guild)
+            if not log_ch:
+                return
+            content = message.content or "*[pas de texte]*"
+            if len(content) > 1024:
+                content = content[:1021] + "…"
+            embed = discord.Embed(
+                title="🗑️ Message supprimé",
+                color=0xe74c3c,
+                timestamp=datetime.datetime.utcnow()
+            )
+            embed.add_field(name="Auteur", value=f"{message.author.mention} (`{message.author}`)", inline=True)
+            embed.add_field(name="Salon", value=message.channel.mention, inline=True)
+            embed.add_field(name="Contenu", value=content, inline=False)
+            if message.attachments:
+                embed.add_field(name="Pièces jointes", value="\n".join(a.filename for a in message.attachments), inline=False)
+            await log_ch.send(embed=embed)
+        except Exception as e:
+            logger.error(f"on_message_delete log error: {e}")
+
+    async def on_message_edit(self, before, after):
+        if not after.guild or after.author.bot:
+            return
+        if before.content == after.content:
+            return
+        try:
+            log_ch = await get_general_log_channel(after.guild)
+            if not log_ch:
+                return
+            before_content = before.content or "*[pas de texte]*"
+            after_content = after.content or "*[pas de texte]*"
+            if len(before_content) > 512:
+                before_content = before_content[:509] + "…"
+            if len(after_content) > 512:
+                after_content = after_content[:509] + "…"
+            embed = discord.Embed(
+                title="✏️ Message modifié",
+                color=0xf39c12,
+                timestamp=datetime.datetime.utcnow()
+            )
+            embed.add_field(name="Auteur", value=f"{after.author.mention} (`{after.author}`)", inline=True)
+            embed.add_field(name="Salon", value=after.channel.mention, inline=True)
+            embed.add_field(name="Avant", value=before_content, inline=False)
+            embed.add_field(name="Après", value=after_content, inline=False)
+            embed.add_field(name="Lien", value=f"[Voir le message]({after.jump_url})", inline=False)
+            await log_ch.send(embed=embed)
+        except Exception as e:
+            logger.error(f"on_message_edit log error: {e}")
+
+    async def on_invite_create(self, invite):
+        if not invite.guild:
+            return
+        try:
+            log_ch = await get_general_log_channel(invite.guild)
+            if not log_ch:
+                return
+            embed = discord.Embed(
+                title="🔗 Invitation créée",
+                color=0x3498db,
+                timestamp=datetime.datetime.utcnow()
+            )
+            inviter = invite.inviter
+            embed.add_field(name="Créateur", value=f"{inviter.mention} (`{inviter}`)" if inviter else "Inconnu", inline=True)
+            embed.add_field(name="Code", value=f"`{invite.code}`", inline=True)
+            embed.add_field(name="Salon", value=invite.channel.mention if invite.channel else "Inconnu", inline=True)
+            uses_max = str(invite.max_uses) if invite.max_uses else "∞"
+            expires = f"<t:{int(invite.expires_at.timestamp())}:R>" if invite.expires_at else "Jamais"
+            embed.add_field(name="Utilisations max", value=uses_max, inline=True)
+            embed.add_field(name="Expire", value=expires, inline=True)
+            await log_ch.send(embed=embed)
+        except Exception as e:
+            logger.error(f"on_invite_create log error: {e}")
+
+    async def on_guild_stickers_update(self, guild, before, after):
+        try:
+            log_ch = await get_general_log_channel(guild)
+            if not log_ch:
+                return
+            added = set(s.id for s in after) - set(s.id for s in before)
+            removed = set(s.id for s in before) - set(s.id for s in after)
+            if not added and not removed:
+                return
+            embed = discord.Embed(title="🎨 Stickers mis à jour", color=0x9b59b6, timestamp=datetime.datetime.utcnow())
+            if added:
+                names = [s.name for s in after if s.id in added]
+                embed.add_field(name="Ajoutés", value=", ".join(names), inline=False)
+            if removed:
+                names = [s.name for s in before if s.id in removed]
+                embed.add_field(name="Supprimés", value=", ".join(names), inline=False)
+            await log_ch.send(embed=embed)
+        except Exception as e:
+            logger.error(f"on_guild_stickers_update log error: {e}")
+
 
 bot = NexusBot()
 
@@ -2043,79 +2140,39 @@ async def apply_punishment(guild, user, protection_key):
         await log_to_db('error', f'Failed to apply punishment {punishment} to {user}: {e}')
 
 
-AUDIT_LOG_CHANNELS = {
-    "role": "logs・rôles",
-    "channel": "logs・salons",
-    "member": "logs・membres",
-    "voice": "logs・vocal",
-    "message": "logs・messages",
-    "server": "logs・serveur",
-    "salon_access": "logs・salon-access",
-}
+GENERAL_LOG_CHANNEL = "logs・général"
 
-PROTECTION_TO_LOG_CHANNEL = {
-    "anti_role_add": "logs・rôles",
-    "anti_role_create": "logs・rôles",
-    "anti_role_remove": "logs・rôles",
-    "anti_role_update": "logs・rôles",
-    "anti_role_delete": "logs・rôles",
-    "anti_role_position": "logs・rôles",
-    "anti_role_dangerous_perm": "logs・rôles",
-    "anti_channel_create": "logs・salons",
-    "anti_channel_update": "logs・salons",
-    "anti_channel_delete": "logs・salons",
-    "anti_channel_perm_update": "logs・salons",
-    "anti_thread_create": "logs・salons",
-    "anti_ban": "logs・membres",
-    "anti_unban": "logs・membres",
-    "anti_kick": "logs・membres",
-    "anti_timeout": "logs・membres",
-    "anti_disconnect": "logs・vocal",
-    "anti_member_move": "logs・vocal",
-    "anti_mute": "logs・vocal",
-    "anti_deafen": "logs・vocal",
-    "anti_link": "logs・messages",
-    "anti_spam": "logs・messages",
-    "anti_toxicity": "logs・messages",
-    "anti_embed_delete": "logs・messages",
-    "anti_gif_spam": "logs・messages",
-    "anti_mention_spam": "logs・messages",
-    "anti_server_update": "logs・serveur",
-    "anti_webhook_create": "logs・serveur",
-    "anti_bot_add": "logs・serveur",
-    "salon_access": "logs・salon-access",
-}
+AUDIT_LOG_CHANNELS = {k: GENERAL_LOG_CHANNEL for k in [
+    "role", "channel", "member", "voice", "message", "server", "salon_access"
+]}
+
+
+async def get_general_log_channel(guild):
+    """Retourne le salon logs・général dans la catégorie RShield - Logs, ou None."""
+    try:
+        cat = discord.utils.get(guild.categories, name="RShield - Logs")
+        if cat:
+            ch = discord.utils.get(cat.text_channels, name=GENERAL_LOG_CHANNEL)
+            if ch:
+                return ch
+        # Fallback: chercher n'importe quel log_channel_id configuré
+        prot = await get_protection(str(guild.id), "anti_ban")
+        if prot and prot.get('log_channel_id'):
+            ch = guild.get_channel(int(prot['log_channel_id']))
+            if ch:
+                return ch
+    except Exception:
+        pass
+    return None
 
 
 async def send_audit_log(guild, category_key, title, description, color=0x2b2d31, thumbnail_url=None):
     try:
-        channel_name = AUDIT_LOG_CHANNELS.get(category_key)
-        if not channel_name:
-            return
-        log_ch = None
-        prot_keys_map = {
-            "role": ["anti_role_create", "anti_role_delete", "anti_role_add", "anti_role_remove", "anti_role_update"],
-            "channel": ["anti_channel_create", "anti_channel_delete", "anti_channel_update", "anti_thread_create"],
-            "member": ["anti_ban", "anti_unban", "anti_kick", "anti_timeout"],
-            "voice": ["anti_disconnect", "anti_member_move", "anti_mute", "anti_deafen"],
-            "message": ["anti_link", "anti_spam"],
-            "server": ["anti_server_update", "anti_webhook_create", "anti_bot_add"],
-            "salon_access": ["salon_access"],
-        }
-        for pkey in prot_keys_map.get(category_key, []):
-            prot = await get_protection(str(guild.id), pkey)
-            if prot and prot['log_channel_id']:
-                ch = guild.get_channel(int(prot['log_channel_id']))
-                if ch:
-                    log_ch = ch
-                    break
-        if not log_ch:
-            cat = discord.utils.get(guild.categories, name="RShield - Logs")
-            if cat:
-                log_ch = discord.utils.get(cat.text_channels, name=channel_name)
+        log_ch = await get_general_log_channel(guild)
         if not log_ch:
             return
         embed = discord.Embed(title=title, description=description, color=color)
+        embed.timestamp = datetime.datetime.utcnow()
         if thumbnail_url:
             embed.set_thumbnail(url=thumbnail_url)
         await log_ch.send(embed=embed)
@@ -2124,33 +2181,28 @@ async def send_audit_log(guild, category_key, title, description, color=0x2b2d31
 
 
 async def send_protection_log(guild, protection_key, user, detail_text, role=None, target=None):
-    prot = await get_protection(guild.id, protection_key)
-    if not prot or not prot['log_channel_id']:
-        return
     try:
-        channel = guild.get_channel(int(prot['log_channel_id']))
+        channel = await get_general_log_channel(guild)
         if not channel:
             return
+        prot = await get_protection(guild.id, protection_key)
 
         mod = next((m for m in PROTECTION_MODULES if m['key'] == protection_key), None)
-        mod_label = mod['label'] if mod else protection_key
 
         punishment_str = "Bannissement."
-        if prot['punishment']:
+        if prot and prot.get('punishment'):
             for p in PUNISHMENT_OPTIONS:
                 if p['value'] == prot['punishment']:
                     punishment_str = f"{p['label']}."
                     break
 
-        perm_str = "Activé." if prot['enabled'] else "Désactivé."
+        perm_str = "Activé." if (prot and prot.get('enabled')) else "Désactivé."
 
-        mention_lines = []
-        mention_lines.append(f"**Auteur:** <@{user.id}>")
+        mention_lines = [f"**Auteur:** <@{user.id}>"]
         if target:
             mention_lines.append(f"**Cible:** <@{target.id}>")
 
-        code_lines = [f"+ {detail_text}"]
-        code_lines.append(f"Utilisateur: {user} (ID: {user.id})")
+        code_lines = [f"+ {detail_text}", f"Utilisateur: {user} (ID: {user.id})"]
         if target:
             code_lines.append(f"Cible: {target} (ID: {target.id})")
         if role:
@@ -2160,10 +2212,8 @@ async def send_protection_log(guild, protection_key, user, detail_text, role=Non
 
         description = "\n".join(mention_lines) + "\n```diff\n" + "\n".join(code_lines) + "\n```"
 
-        embed = discord.Embed(
-            description=description,
-            color=0x2b2d31
-        )
+        embed = discord.Embed(description=description, color=0x2b2d31)
+        embed.timestamp = datetime.datetime.utcnow()
         await channel.send(embed=embed)
     except Exception as e:
         logger.error(f"Failed to send protection log: {e}")
@@ -4284,7 +4334,7 @@ async def ramzan_command(interaction: discord.Interaction):
             pass
 
 
-@bot.tree.command(name="logs", description="Créer automatiquement les salons de logs pour tous les modules.")
+@bot.tree.command(name="logs", description="Créer le salon logs・général pour tous les événements du serveur.")
 async def logs_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -4298,11 +4348,11 @@ async def logs_command(interaction: discord.Interaction):
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         }
         for role in guild.roles:
             if role.permissions.administrator and role != guild.default_role:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, read_message_history=True)
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=False)
 
         category = discord.utils.get(guild.categories, name="RShield - Logs")
         if not category:
@@ -4314,46 +4364,48 @@ async def logs_command(interaction: discord.Interaction):
         else:
             await category.edit(overwrites=overwrites)
 
-        LOG_GROUPS = {
-            "logs・rôles": ["anti_role_add", "anti_role_create", "anti_role_remove", "anti_role_update", "anti_role_delete", "anti_role_position"],
-            "logs・salons": ["anti_channel_create", "anti_channel_update", "anti_channel_delete", "anti_thread_create"],
-            "logs・membres": ["anti_ban", "anti_unban", "anti_kick", "anti_timeout"],
-            "logs・vocal": ["anti_disconnect", "anti_member_move", "anti_mute", "anti_deafen"],
-            "logs・messages": ["anti_link", "anti_spam", "anti_toxicity", "anti_embed_delete", "anti_gif_spam", "anti_mention_spam"],
-            "logs・serveur": ["anti_server_update", "anti_webhook_create", "anti_bot_add"],
-            "logs・salon-access": ["salon_access"],
-        }
+        existing = discord.utils.get(category.text_channels, name=GENERAL_LOG_CHANNEL)
+        if not existing:
+            log_ch = await guild.create_text_channel(
+                GENERAL_LOG_CHANNEL,
+                category=category,
+                overwrites=overwrites,
+                topic="Tous les événements du serveur — géré par NexusBot"
+            )
+        else:
+            log_ch = existing
 
-        created_channels = []
-        for group_name, keys in LOG_GROUPS.items():
-            existing = discord.utils.get(category.text_channels, name=group_name)
-            if not existing:
-                ch = await guild.create_text_channel(group_name, category=category, overwrites=overwrites)
-            else:
-                ch = existing
-            for key in keys:
-                await set_protection(str(guild.id), key, log_channel_id=str(ch.id))
-            created_channels.append(ch.mention)
+        ALL_PROTECTION_KEYS = [
+            "anti_role_add", "anti_role_create", "anti_role_remove", "anti_role_update",
+            "anti_role_delete", "anti_role_position", "anti_role_dangerous_perm",
+            "anti_channel_create", "anti_channel_update", "anti_channel_delete",
+            "anti_channel_perm_update", "anti_thread_create",
+            "anti_ban", "anti_unban", "anti_kick", "anti_timeout",
+            "anti_disconnect", "anti_member_move", "anti_mute", "anti_deafen",
+            "anti_link", "anti_spam", "anti_toxicity", "anti_embed_delete",
+            "anti_gif_spam", "anti_mention_spam",
+            "anti_server_update", "anti_webhook_create", "anti_bot_add",
+            "salon_access",
+        ]
+        for key in ALL_PROTECTION_KEYS:
+            await set_protection(str(guild.id), key, log_channel_id=str(log_ch.id))
 
         embed = discord.Embed(
-            description=f"✅ **{len(created_channels)}** salons de logs créés/configurés dans la catégorie **Shield Logs**.\nAccès limité aux rôles administrateurs.",
+            title="✅ Logs configurés",
+            description=f"Le salon {log_ch.mention} a été créé/configuré.\n\nTous les événements du serveur y seront enregistrés :\n> 👤 Membres (join, leave, ban, kick, timeout…)\n> 🎭 Rôles (créations, modifications, suppressions)\n> 📝 Messages (suppressions, éditions)\n> 🔊 Vocal (connexions, déplacements, mutes)\n> ⚙️ Serveur (paramètres, webhooks, bots)\n> 📁 Salons & threads\n> 🎉 Invitations & emojis",
             color=0x2b2d31
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
-        await log_to_db('info', f'/logs used by {interaction.user} in {guild.name} — {len(created_channels)} channels')
+        await log_to_db('info', f'/logs used by {interaction.user} in {guild.name}')
     except Exception as e:
         logger.error(f"Error in /logs command: {traceback.format_exc()}")
-        try:
-            await log_to_db('error', f'Error in /logs: {e}')
-        except Exception:
-            pass
         try:
             await interaction.followup.send("Une erreur est survenue.", ephemeral=True)
         except Exception:
             pass
 
 
-@bot.tree.command(name="supplogs", description="Supprimer les salons de logs et réinitialiser la config.")
+@bot.tree.command(name="supplogs", description="Supprimer le salon de logs et réinitialiser la config.")
 async def supplogs_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -4383,17 +4435,13 @@ async def supplogs_command(interaction: discord.Interaction):
             await set_protection(str(guild.id), mod['key'], log_channel_id="")
 
         embed = discord.Embed(
-            description=f"✅ **{deleted_count}** salons de logs supprimés et configuration des logs réinitialisée.",
+            description=f"✅ Salon de logs supprimé et configuration réinitialisée.",
             color=0x2b2d31
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
-        await log_to_db('info', f'/supplogs used by {interaction.user} in {guild.name} — {deleted_count} channels deleted')
+        await log_to_db('info', f'/supplogs used by {interaction.user} in {guild.name}')
     except Exception as e:
         logger.error(f"Error in /supplogs command: {traceback.format_exc()}")
-        try:
-            await log_to_db('error', f'Error in /supplogs: {e}')
-        except Exception:
-            pass
         try:
             await interaction.followup.send("Une erreur est survenue.", ephemeral=True)
         except Exception:
