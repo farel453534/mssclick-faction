@@ -5042,19 +5042,17 @@ async def cmd_forcemaj(interaction: discord.Interaction):
 @bot.tree.command(name="testmaj", description="Simule une notification de mise à jour du règlement pour tester l'affichage.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    section="Nom de la section modifiée (défaut : 'Règles générales')",
+    section="Chemin de la section modifiée, ex: Accueil -> Fiche de Suivi (défaut : 'Règles générales')",
     ajout="Texte simulé ajouté dans la section",
-    suppression="Texte simulé supprimé de la section",
+    ajout2="Second texte ajouté (optionnel)",
     nouvelle_section="Simuler l'ajout d'une toute nouvelle section",
-    section_supprimee="Simuler la suppression d'une section",
 )
 async def cmd_testmaj(
     interaction: discord.Interaction,
-    section: str = "Règles générales",
+    section: str = "Accueil -> Règles générales",
     ajout: str = "Les joueurs doivent respecter les règles du serveur à tout moment.",
-    suppression: str = "Ancienne règle qui ne s'applique plus.",
+    ajout2: str = "",
     nouvelle_section: str = "",
-    section_supprimee: str = "",
 ):
     if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
         await interaction.response.send_message(
@@ -5068,22 +5066,18 @@ async def cmd_testmaj(
     modifications = []
 
     if nouvelle_section:
-        label = nouvelle_section[:70] + "…" if len(nouvelle_section) > 70 else nouvelle_section
+        label = nouvelle_section[:80] + "…" if len(nouvelle_section) > 80 else nouvelle_section
         general_changes.append(f'Nouvelle section : « {label} »')
 
-    if section_supprimee:
-        label = section_supprimee[:70] + "…" if len(section_supprimee) > 70 else section_supprimee
-        general_changes.append(f'Section supprimée : « {label} »')
-
-    sec_label = section[:50] + "…" if len(section) > 50 else section
+    sec_label = section[:60] + "…" if len(section) > 60 else section
 
     if ajout:
         preview = ajout[:80] + "…" if len(ajout) > 80 else ajout
         modifications.append(f'[{sec_label}] Ajout : « {preview} »')
 
-    if suppression:
-        preview = suppression[:80] + "…" if len(suppression) > 80 else suppression
-        modifications.append(f'[{sec_label}] Suppression : « {preview} »')
+    if ajout2:
+        preview = ajout2[:80] + "…" if len(ajout2) > 80 else ajout2
+        modifications.append(f'[{sec_label}] Ajout : « {preview} »')
 
     try:
         channel = interaction.guild.get_channel(GDRIVE_NOTIFY_CHANNEL_ID) if interaction.guild else None
@@ -5234,31 +5228,31 @@ def _clean_text(text: str) -> str:
 def _parse_google_site(html: str) -> dict:
     """
     Parse a Google Sites page and extract structured content by section.
-    Returns {"sections": {section_name: [text, ...]}, "headings": [...], "text_blocks": [...]}
+    Section keys are full hierarchical paths like "Accueil -> Fiche de Suivi".
+    Returns {"sections": {path: [text, ...]}, "headings": [...], "text_blocks": [...]}
     """
     try:
         soup = BeautifulSoup(html, 'html.parser')
     except Exception:
         return {"sections": {}, "headings": [], "text_blocks": []}
 
-    # Remove non-content elements
     for tag in soup(['script', 'style', 'noscript', 'meta', 'head', 'nav', 'footer', 'header']):
         tag.decompose()
 
-    # Try to extract embedded JSON content from Google Sites data attributes
     sections: dict = {}
-    current_section = "Général"
+    current_path = "Général"
     current_blocks: list = []
     seen_texts: set = set()
+
+    # Stack of (level, text) to build hierarchical paths
+    path_stack: list = []
 
     HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
     CONTENT_TAGS = {'p', 'li', 'td', 'blockquote', 'span', 'div'}
 
-    # Walk all elements in document order
     for elem in soup.find_all(HEADING_TAGS | CONTENT_TAGS):
         tag = elem.name
 
-        # Skip containers that wrap other block elements (avoid duplicates)
         if tag in CONTENT_TAGS and elem.find(list(HEADING_TAGS | {'p', 'li', 'blockquote'})):
             continue
 
@@ -5271,10 +5265,17 @@ def _parse_google_site(html: str) -> dict:
         if tag in HEADING_TAGS:
             # Flush current section
             if current_blocks:
-                sections.setdefault(current_section, [])
-                sections[current_section].extend(current_blocks)
+                sections.setdefault(current_path, [])
+                sections[current_path].extend(current_blocks)
                 current_blocks = []
-            current_section = text
+
+            level = int(tag[1])
+            # Pop stack entries of same or deeper level
+            while path_stack and path_stack[-1][0] >= level:
+                path_stack.pop()
+            path_stack.append((level, text))
+
+            current_path = " -> ".join(t for _, t in path_stack)
             seen_texts.add(text)
         else:
             if text not in seen_texts and len(text) > 5:
@@ -5283,10 +5284,9 @@ def _parse_google_site(html: str) -> dict:
 
     # Flush last section
     if current_blocks:
-        sections.setdefault(current_section, [])
-        sections[current_section].extend(current_blocks)
+        sections.setdefault(current_path, [])
+        sections[current_path].extend(current_blocks)
 
-    # Flat lists for backward compat
     headings = list(sections.keys())
     text_blocks = [b for blocks in sections.values() for b in blocks]
 
@@ -5296,7 +5296,8 @@ def _parse_google_site(html: str) -> dict:
 def _diff_site_content(old_data: dict, new_data: dict):
     """
     Compare two parsed site snapshots and return (general_changes, modifications).
-    Changes are labelled with the section name they belong to.
+    Only reports additions — suppressions are ignored.
+    Section labels use the full hierarchical path (e.g. "Accueil -> Fiche de Suivi").
     """
     general_changes = []
     modifications = []
@@ -5304,44 +5305,36 @@ def _diff_site_content(old_data: dict, new_data: dict):
     old_sections = old_data.get("sections", {})
     new_sections = new_data.get("sections", {})
 
-    # ── If both snapshots have section data, use detailed comparison ──
+    # ── Section-aware comparison ──
     if old_sections or new_sections:
-        # Sections added
+        # New sections only (no suppression reporting)
         for section in new_sections:
             if section not in old_sections:
-                label = section[:70] + "…" if len(section) > 70 else section
+                label = section[:80] + "…" if len(section) > 80 else section
                 general_changes.append(f'Nouvelle section : « {label} »')
 
-        # Sections removed
-        for section in old_sections:
-            if section not in new_sections:
-                label = section[:70] + "…" if len(section) > 70 else section
-                general_changes.append(f'Section supprimée : « {label} »')
-
-        # Content changed inside existing sections
+        # Content added inside existing sections
         for section in new_sections:
             if section not in old_sections:
                 continue
             old_set = set(old_sections[section])
             new_set = set(new_sections[section])
 
-            sec_label = section[:50] + "…" if len(section) > 50 else section
+            added = list(new_set - old_set)
+            if not added:
+                continue
 
-            for block in list(new_set - old_set)[:4]:
+            sec_label = section[:60] + "…" if len(section) > 60 else section
+            for block in added[:4]:
                 preview = block[:80] + "…" if len(block) > 80 else block
                 modifications.append(f'[{sec_label}] Ajout : « {preview} »')
 
-            for block in list(old_set - new_set)[:4]:
-                preview = block[:80] + "…" if len(block) > 80 else block
-                modifications.append(f'[{sec_label}] Suppression : « {preview} »')
-
         return general_changes, modifications
 
-    # ── Fallback: flat heading/text comparison (legacy snapshot format) ──
+    # ── Fallback: flat comparison (legacy snapshot without sections) ──
     old_headings_raw = old_data.get("headings", [])
     new_headings_raw = new_data.get("headings", [])
 
-    # Support both old format (list of dicts with "path") and new format (list of str)
     def _heading_key(h):
         return h["path"] if isinstance(h, dict) else h
 
@@ -5349,12 +5342,7 @@ def _diff_site_content(old_data: dict, new_data: dict):
     new_h = {_heading_key(h) for h in new_headings_raw}
 
     for path in new_h - old_h:
-        name = path.split(" -> ")[-1] if " -> " in path else path
-        general_changes.append(f'Nouvelle section : « {name[:70]} »')
-
-    for path in old_h - new_h:
-        name = path.split(" -> ")[-1] if " -> " in path else path
-        general_changes.append(f'Section supprimée : « {name[:70]} »')
+        general_changes.append(f'Nouvelle section : « {path[:80]} »')
 
     old_blocks = set(old_data.get("text_blocks", []))
     new_blocks = set(new_data.get("text_blocks", []))
@@ -5362,10 +5350,6 @@ def _diff_site_content(old_data: dict, new_data: dict):
     for block in list(new_blocks - old_blocks)[:6]:
         preview = block[:80] + "…" if len(block) > 80 else block
         modifications.append(f'Ajout : « {preview} »')
-
-    for block in list(old_blocks - new_blocks)[:6]:
-        preview = block[:80] + "…" if len(block) > 80 else block
-        modifications.append(f'Suppression : « {preview} »')
 
     return general_changes, modifications
 
