@@ -10,6 +10,11 @@ import logging
 import traceback
 import re
 import time as _time
+import aiohttp
+import hashlib
+import datetime
+import json
+from bs4 import BeautifulSoup
 
 try:
     from dotenv import load_dotenv
@@ -194,6 +199,38 @@ async def init_db():
                     leave_channel_id TEXT
                 );
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS site_monitor (
+                    id SERIAL PRIMARY KEY,
+                    url TEXT NOT NULL UNIQUE,
+                    channel_id TEXT NOT NULL,
+                    last_hash TEXT,
+                    last_content TEXT,
+                    last_checked TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            await conn.execute("""
+                ALTER TABLE site_monitor ADD COLUMN IF NOT EXISTS last_content TEXT;
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS suggestions_log (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    nom TEXT NOT NULL,
+                    faction TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    user_name TEXT,
+                    suggestion TEXT,
+                    objectif TEXT,
+                    status TEXT DEFAULT 'en_attente',
+                    submitted_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            await conn.execute("""
+                ALTER TABLE suggestions_log ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'en_attente';
+            """)
             existing_keys = await conn.fetchval("SELECT COUNT(*) FROM license_keys")
             if existing_keys == 0:
                 import secrets as sec
@@ -249,6 +286,9 @@ SLASH_COMMANDS = [
     {"name": "/unlock", "params": "[channel]", "description": "Déverrouiller un salon."},
     {"name": "/whitelist", "params": "", "description": "Gérer la liste blanche du serveur."},
     {"name": "/ownerlist", "params": "", "description": "Gérer la liste des créateurs du serveur."},
+    {"name": "/suggestions", "params": "", "description": "Affiche le panneau de suggestions du serveur."},
+    {"name": "/logssuggestions", "params": "", "description": "Affiche les logs des suggestions dans un channel admin."},
+    {"name": "/forcemaj", "params": "", "description": "Force une vérification immédiate du site de règlement."},
 ]
 
 TEXT_COMMANDS = [
@@ -355,7 +395,11 @@ class NexusBot(discord.Client):
         if not process_outgoing_messages.is_running():
             process_outgoing_messages.start()
 
+        if not check_site_updates.is_running():
+            check_site_updates.start()
+
         self.add_view(SuggestionButtonView())
+        await register_suggestion_views()
 
     async def on_guild_join(self, guild):
         try:
@@ -4612,6 +4656,114 @@ async def help_command(interaction: discord.Interaction):
             pass
 
 
+STATUS_LABELS = {
+    "acceptee": ("✅", "Acceptée",   discord.ButtonStyle.success, 0x2ecc71),
+    "encours":  ("🔄", "En cours",   discord.ButtonStyle.primary, 0x3498db),
+    "refusee":  ("❌", "Refusée",    discord.ButtonStyle.danger,  0xe74c3c),
+    "en_attente": ("⏳", "En attente", discord.ButtonStyle.secondary, 0x95a5a6),
+}
+
+
+def _build_suggestion_log_embed(row: dict, votes_yes: int = 0, votes_no: int = 0) -> discord.Embed:
+    status_key = row.get("status") or "en_attente"
+    status_emoji, status_label, _, status_color = STATUS_LABELS.get(status_key, STATUS_LABELS["en_attente"])
+    submitted_ts = int(row["submitted_at"].timestamp()) if row.get("submitted_at") else 0
+    submitted_str = f"<t:{submitted_ts}:R>" if submitted_ts else "Date inconnue"
+
+    embed = discord.Embed(
+        title=f"💡 {row['nom']}",
+        color=status_color,
+    )
+    embed.add_field(name="Faction :", value=f"**{row['faction']}**", inline=True)
+    embed.add_field(name="👤 Proposé par :", value=f"<@{row['user_id']}>", inline=True)
+    embed.add_field(name="📅 Soumis :", value=submitted_str, inline=True)
+    embed.add_field(name="__**Suggestion :**__", value=row.get("suggestion") or "N/A", inline=False)
+    embed.add_field(name="__**Objectif :**__", value=row.get("objectif") or "N/A", inline=False)
+    embed.add_field(
+        name="📊 Votes",
+        value=f"✅ **{votes_yes}** approbation(s)  ·  ❌ **{votes_no}** refus",
+        inline=False,
+    )
+    embed.add_field(
+        name="📌 Statut",
+        value=f"{status_emoji} **{status_label}**",
+        inline=False,
+    )
+    embed.set_footer(text=f"ID suggestion : {row['message_id']}")
+    return embed
+
+
+class StatusButton(discord.ui.Button):
+    def __init__(self, message_id: str, status: str):
+        emoji, label, style, _ = STATUS_LABELS[status]
+        super().__init__(
+            label=label,
+            style=style,
+            emoji=emoji,
+            custom_id=f"sugg_{status}_{message_id}",
+        )
+        self.message_id = message_id
+        self.status = status
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
+            await interaction.response.send_message(
+                "❌ Seuls les membres de la ownerlist peuvent modifier le statut.",
+                ephemeral=True
+            )
+            return
+
+        if not pool:
+            await interaction.response.send_message("❌ Base de données non connectée.", ephemeral=True)
+            return
+
+        await pool.execute(
+            "UPDATE suggestions_log SET status = $1 WHERE message_id = $2",
+            self.status, self.message_id
+        )
+
+        row = await pool.fetchrow("SELECT * FROM suggestions_log WHERE message_id = $1", self.message_id)
+        if not row:
+            await interaction.response.send_message("❌ Suggestion introuvable en base.", ephemeral=True)
+            return
+
+        votes_yes = votes_no = 0
+        try:
+            sugg_ch = interaction.guild.get_channel(SUGGESTION_CHANNEL_ID)
+            if sugg_ch:
+                orig = await sugg_ch.fetch_message(int(self.message_id))
+                for r in orig.reactions:
+                    if str(r.emoji) == "✅":
+                        votes_yes = r.count - 1
+                    elif str(r.emoji) == "❌":
+                        votes_no = r.count - 1
+        except Exception:
+            pass
+
+        new_embed = _build_suggestion_log_embed(dict(row), votes_yes, votes_no)
+        await interaction.response.edit_message(embed=new_embed)
+        await log_to_db('info', f'Statut suggestion {self.message_id} → {self.status} par {interaction.user}')
+
+
+class SuggestionStatusView(discord.ui.View):
+    def __init__(self, message_id: str):
+        super().__init__(timeout=None)
+        for status in ("acceptee", "encours", "refusee"):
+            self.add_item(StatusButton(message_id, status))
+
+
+async def register_suggestion_views():
+    if not pool:
+        return
+    try:
+        rows = await pool.fetch("SELECT message_id FROM suggestions_log")
+        for row in rows:
+            bot.add_view(SuggestionStatusView(row["message_id"]))
+        logger.info(f"Registered {len(rows)} suggestion status views.")
+    except Exception as e:
+        logger.error(f"Error registering suggestion views: {e}")
+
+
 SUGGESTION_CHANNEL_ID = 1062740126087774268
 
 FACTIONS = [
@@ -4711,6 +4863,24 @@ class SuggestionModal(discord.ui.Modal, title="Créer une suggestion"):
             msg = await channel.send(embed=embed)
             await msg.add_reaction("✅")
             await msg.add_reaction("❌")
+            if pool:
+                try:
+                    await pool.execute(
+                        """INSERT INTO suggestions_log
+                           (guild_id, message_id, channel_id, nom, faction, user_id, user_name, suggestion, objectif)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                        str(interaction.guild.id),
+                        str(msg.id),
+                        str(channel.id),
+                        self.nom.value,
+                        self.faction,
+                        str(interaction.user.id),
+                        str(interaction.user),
+                        self.suggestion.value,
+                        self.objectif.value,
+                    )
+                except Exception as db_err:
+                    logger.error(f"Erreur sauvegarde suggestion en DB : {db_err}")
             await interaction.followup.send("✅ Ta suggestion a bien été envoyée !", ephemeral=True)
             await log_to_db('info', f'Suggestion créée par {interaction.user} dans {interaction.guild.name}')
         except Exception as e:
@@ -4773,6 +4943,12 @@ class SuggestionButtonView(discord.ui.View):
 @bot.tree.command(name="suggestions", description="Affiche le panneau de suggestions du serveur.")
 @app_commands.default_permissions(administrator=True)
 async def cmd_suggestions(interaction: discord.Interaction):
+    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
+            ephemeral=True
+        )
+        return
     embed = discord.Embed(
         title="📋 Foire aux Questions — Suggestions",
         description=(
@@ -4785,9 +4961,185 @@ async def cmd_suggestions(interaction: discord.Interaction):
         ),
         color=0x5865F2,
     )
-    embed.set_footer(text="Merci de votre participation !")
     view = SuggestionButtonView()
     await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="forcemaj", description="Force une vérification immédiate du site de règlement.")
+@app_commands.default_permissions(administrator=True)
+async def cmd_forcemaj(interaction: discord.Interaction):
+    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
+            ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    if not pool:
+        await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; NexusBot/1.0)"}
+            async with session.get(GDRIVE_SITE_URL, timeout=aiohttp.ClientTimeout(total=20), headers=headers) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send(f"❌ Impossible d'accéder au site (HTTP {resp.status}).", ephemeral=True)
+                    return
+                html = await resp.text()
+
+        current_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
+        current_data = _parse_google_site(html)
+        current_content_json = json.dumps(current_data, ensure_ascii=False)
+
+        row = await pool.fetchrow(
+            "SELECT last_hash, last_content FROM site_monitor WHERE url = $1",
+            GDRIVE_SITE_URL
+        )
+
+        if row is None:
+            await pool.execute(
+                "INSERT INTO site_monitor (url, channel_id, last_hash, last_content) VALUES ($1, $2, $3, $4)",
+                GDRIVE_SITE_URL, str(GDRIVE_NOTIFY_CHANNEL_ID), current_hash, current_content_json
+            )
+            await interaction.followup.send("✅ Première vérification enregistrée. Les prochaines mises à jour seront notifiées.", ephemeral=True)
+            return
+
+        if row["last_hash"] == current_hash:
+            await interaction.followup.send("✅ Aucun changement détecté sur le site.", ephemeral=True)
+            return
+
+        old_data = {}
+        if row["last_content"]:
+            try:
+                old_data = json.loads(row["last_content"])
+            except Exception:
+                old_data = {}
+
+        await pool.execute(
+            "UPDATE site_monitor SET last_hash = $1, last_content = $2, last_checked = NOW() WHERE url = $3",
+            current_hash, current_content_json, GDRIVE_SITE_URL
+        )
+
+        channel = interaction.guild.get_channel(GDRIVE_NOTIFY_CHANNEL_ID)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(GDRIVE_NOTIFY_CHANNEL_ID)
+            except Exception:
+                await interaction.followup.send("❌ Channel de notification introuvable.", ephemeral=True)
+                return
+
+        general_changes, modifications = _diff_site_content(old_data, current_data)
+        if not general_changes and not modifications:
+            general_changes = ["Mise à jour détectée sur le site"]
+
+        await _send_site_update(channel, general_changes, modifications)
+        await interaction.followup.send(f"✅ Mise à jour détectée et postée dans <#{GDRIVE_NOTIFY_CHANNEL_ID}>.", ephemeral=True)
+        await log_to_db('info', f'/forcemaj: mise à jour publiée par {interaction.user}')
+
+    except Exception as e:
+        logger.error(f"Erreur dans /forcemaj: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+
+
+@bot.tree.command(name="logssuggestions", description="Affiche les logs des suggestions dans un channel admin.")
+@app_commands.default_permissions(administrator=True)
+async def cmd_logssuggestions(interaction: discord.Interaction):
+    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
+            ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    try:
+        CATEGORY_NAME = "Faction - Logs"
+        CHANNEL_NAME = "logs-suggestions"
+
+        category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+        if not category:
+            overwrites_cat = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            }
+            for role in guild.roles:
+                if role.permissions.administrator or role.permissions.manage_guild:
+                    overwrites_cat[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            category = await guild.create_category(CATEGORY_NAME, overwrites=overwrites_cat)
+
+        log_channel = discord.utils.get(guild.text_channels, name=CHANNEL_NAME, category=category)
+        if not log_channel:
+            overwrites_ch = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            }
+            for role in guild.roles:
+                if role.permissions.administrator or role.permissions.manage_guild:
+                    overwrites_ch[role] = discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=False,
+                        read_message_history=True,
+                    )
+            log_channel = await guild.create_text_channel(
+                CHANNEL_NAME,
+                category=category,
+                overwrites=overwrites_ch,
+                topic="Logs des suggestions soumises via /suggestions",
+            )
+
+        if not pool:
+            await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
+            return
+
+        rows = await pool.fetch(
+            "SELECT * FROM suggestions_log WHERE guild_id = $1 ORDER BY submitted_at DESC LIMIT 25",
+            str(guild.id)
+        )
+
+        if not rows:
+            await log_channel.send("📭 Aucune suggestion enregistrée pour le moment.")
+            await interaction.followup.send(f"✅ Logs postés dans {log_channel.mention} (aucune suggestion trouvée).", ephemeral=True)
+            return
+
+        header = discord.Embed(
+            title="📋 Logs des Suggestions",
+            description=f"**{len(rows)}** suggestion(s) enregistrée(s) — triées de la plus récente à la plus ancienne.",
+            color=0x5865F2,
+        )
+        header.set_footer(text=f"Serveur : {guild.name}")
+        header.timestamp = datetime.datetime.utcnow()
+        await log_channel.send(embed=header)
+
+        sugg_channel_obj = guild.get_channel(SUGGESTION_CHANNEL_ID)
+
+        for row in rows:
+            votes_yes = 0
+            votes_no = 0
+            try:
+                if sugg_channel_obj:
+                    msg_obj = await sugg_channel_obj.fetch_message(int(row["message_id"]))
+                    for reaction in msg_obj.reactions:
+                        if str(reaction.emoji) == "✅":
+                            votes_yes = reaction.count - 1
+                        elif str(reaction.emoji) == "❌":
+                            votes_no = reaction.count - 1
+            except Exception:
+                pass
+
+            embed = _build_suggestion_log_embed(dict(row), votes_yes, votes_no)
+            view = SuggestionStatusView(row["message_id"])
+            await log_channel.send(embed=embed, view=view)
+
+        await interaction.followup.send(
+            f"✅ **{len(rows)}** suggestion(s) postée(s) dans {log_channel.mention}.",
+            ephemeral=True,
+        )
+        await log_to_db('info', f'/logssuggestions utilisé par {interaction.user} dans {guild.name}')
+
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Je n'ai pas les permissions nécessaires pour créer des channels.", ephemeral=True)
+    except Exception as e:
+        logger.error(f"Erreur dans /logssuggestions: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
 
 
 @bot.tree.error
@@ -4804,6 +5156,180 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.followup.send("Une erreur est survenue.", ephemeral=True)
     except Exception:
         pass
+
+
+GDRIVE_SITE_URL = "https://sites.google.com/view/mssclick-reglement-faction?usp=sharing"
+GDRIVE_NOTIFY_CHANNEL_ID = 1102038156204847164
+GDRIVE_ROLE_ID = 1062740125475426405
+
+
+def _parse_google_site(html: str) -> dict:
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+    except Exception:
+        return {"headings": [], "text_blocks": []}
+
+    for tag in soup(['script', 'style', 'noscript', 'meta', 'head', 'nav']):
+        tag.decompose()
+
+    headings = []
+    path_stack = []
+
+    for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+        level = int(h.name[1])
+        text = h.get_text(strip=True)
+        if not text or len(text) < 2:
+            continue
+        while path_stack and path_stack[-1][0] >= level:
+            path_stack.pop()
+        path_stack.append((level, text))
+        path = " -> ".join(t for _, t in path_stack)
+        headings.append({"level": level, "text": text, "path": path})
+
+    seen = set()
+    text_blocks = []
+    for elem in soup.find_all(['p', 'li', 'span', 'td']):
+        if elem.find(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            continue
+        text = elem.get_text(strip=True)
+        if text and len(text) > 10 and text not in seen:
+            seen.add(text)
+            text_blocks.append(text)
+
+    return {"headings": headings, "text_blocks": text_blocks}
+
+
+def _diff_site_content(old_data: dict, new_data: dict):
+    general_changes = []
+    modifications = []
+
+    old_headings = {h["path"]: h for h in old_data.get("headings", [])}
+    new_headings = {h["path"]: h for h in new_data.get("headings", [])}
+
+    for path, h in new_headings.items():
+        if path not in old_headings:
+            name = path.split(" -> ")[-1]
+            nav = path if len(path) <= 80 else "…" + path[-77:]
+            general_changes.append(f'Ajout section : "{name}" ({nav})')
+
+    for path in old_headings:
+        if path not in new_headings:
+            name = path.split(" -> ")[-1]
+            nav = path if len(path) <= 80 else "…" + path[-77:]
+            general_changes.append(f'Suppression section : "{name}" ({nav})')
+
+    old_blocks = set(old_data.get("text_blocks", []))
+    new_blocks = set(new_data.get("text_blocks", []))
+
+    for block in list(new_blocks - old_blocks)[:6]:
+        preview = block[:90] + "…" if len(block) > 90 else block
+        modifications.append(f'Ajout : "{preview}"')
+
+    for block in list(old_blocks - new_blocks)[:6]:
+        preview = block[:90] + "…" if len(block) > 90 else block
+        modifications.append(f'Suppression : "{preview}"')
+
+    return general_changes, modifications
+
+
+async def _send_site_update(channel, general_changes, modifications):
+    today = datetime.datetime.now().strftime("%d/%m/%Y")
+    lines = []
+
+    lines.append(f"# <:mssclick_update:1413942207584665822> __Mise à jour Règlement {today}__ :")
+
+    if general_changes:
+        lines.append("")
+        lines.append("<:mssclick_news:1413943838036197463>                  - __**Général**__")
+        block = "\n".join(f"- {c}" for c in general_changes)
+        lines.append(f"```\n{block}\n```")
+
+    if modifications:
+        lines.append("")
+        lines.append("<:mssclick_rework:1413945740232888503>                  - __**Modification**__")
+        block = "\n".join(f"- {c}" for c in modifications)
+        lines.append(f"```\n{block}\n```")
+
+    lines.append("")
+    lines.append("## __Merci d'aller lire le règlement et prendre en compte les changements.__")
+    lines.append("")
+    lines.append(f"|| <@&{GDRIVE_ROLE_ID}>  ||")
+
+    message = "\n".join(lines)
+    if len(message) > 1990:
+        message = message[:1987] + "…"
+    await channel.send(message)
+
+
+@tasks.loop(minutes=10)
+async def check_site_updates():
+    if not pool:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            try:
+                headers = {"User-Agent": "Mozilla/5.0 (compatible; NexusBot/1.0)"}
+                async with session.get(GDRIVE_SITE_URL, timeout=aiohttp.ClientTimeout(total=20), headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Site monitor: HTTP {resp.status}")
+                        return
+                    html = await resp.text()
+            except Exception as e:
+                logger.error(f"Site monitor fetch error: {e}")
+                return
+
+        current_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
+        current_data = _parse_google_site(html)
+        current_content_json = json.dumps(current_data, ensure_ascii=False)
+
+        row = await pool.fetchrow(
+            "SELECT last_hash, last_content FROM site_monitor WHERE url = $1",
+            GDRIVE_SITE_URL
+        )
+
+        if row is None:
+            await pool.execute(
+                "INSERT INTO site_monitor (url, channel_id, last_hash, last_content) VALUES ($1, $2, $3, $4)",
+                GDRIVE_SITE_URL, str(GDRIVE_NOTIFY_CHANNEL_ID), current_hash, current_content_json
+            )
+            logger.info("Site monitor: première vérification enregistrée.")
+            return
+
+        if row["last_hash"] == current_hash:
+            return
+
+        old_data = {}
+        if row["last_content"]:
+            try:
+                old_data = json.loads(row["last_content"])
+            except Exception:
+                old_data = {}
+
+        await pool.execute(
+            "UPDATE site_monitor SET last_hash = $1, last_content = $2, last_checked = NOW() WHERE url = $3",
+            current_hash, current_content_json, GDRIVE_SITE_URL
+        )
+
+        channel = bot.get_channel(GDRIVE_NOTIFY_CHANNEL_ID)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(GDRIVE_NOTIFY_CHANNEL_ID)
+            except Exception as e:
+                logger.error(f"Site monitor: channel introuvable ({e})")
+                return
+
+        general_changes, modifications = _diff_site_content(old_data, current_data)
+
+        if not general_changes and not modifications:
+            logger.info("Site monitor: changement détecté mais contenu parsé identique (JS dynamique?).")
+            general_changes = ["Mise à jour détectée sur le site"]
+
+        await _send_site_update(channel, general_changes, modifications)
+        await log_to_db('info', f'Site monitor: mise à jour détectée et notifiée.')
+        logger.info("Site monitor: mise à jour notifiée.")
+
+    except Exception as e:
+        logger.error(f"Erreur dans check_site_updates: {e}\n{traceback.format_exc()}")
 
 
 @tasks.loop(seconds=5)
