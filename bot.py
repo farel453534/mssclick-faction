@@ -337,7 +337,7 @@ class NexusBot(discord.Client):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         await log_to_db('info', f'Bot logged in as {self.user}')
 
-        streaming_activity = discord.Streaming(name="MssClick - Club", url="https://twitch.tv/mssclick")
+        streaming_activity = discord.Streaming(name="MssClick - Faction", url="https://twitch.tv/mssclick")
         await self.change_presence(activity=streaming_activity)
 
         if not self.synced:
@@ -4679,29 +4679,28 @@ class SuggestionModal(discord.ui.Modal, title="Créer une suggestion"):
                 return
 
         color = FACTION_COLORS.get(self.faction, 0x2b2d31)
-        emoji = FACTION_EMOJIS.get(self.faction, "❓")
 
         embed = discord.Embed(
             title=f"💡 {self.nom.value}",
             color=color,
         )
         embed.add_field(
-            name=f"{emoji} Faction",
+            name="Faction :",
             value=f"**{self.faction}**",
             inline=True,
         )
         embed.add_field(
-            name="👤 Proposé par",
+            name="👤 Proposé par :",
             value=interaction.user.mention,
             inline=True,
         )
         embed.add_field(
-            name="📝 La Suggestion",
+            name="__**Suggestion :**__",
             value=self.suggestion.value,
             inline=False,
         )
         embed.add_field(
-            name="🎯 Objectif",
+            name="__**Objectif :**__",
             value=self.objectif.value,
             inline=False,
         )
@@ -4779,10 +4778,10 @@ async def cmd_suggestions(interaction: discord.Interaction):
         description=(
             "Vous avez une idée pour améliorer le serveur ?\n"
             "Cliquez sur le bouton ci-dessous pour soumettre votre suggestion.\n\n"
-            "**Vos propositions sont précieuses !** Chaque suggestion sera lue "
-            "et évaluée par l'équipe du serveur. Votez également sur les suggestions "
-            "des autres membres avec ✅ ou ❌.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            "Vos propositions sont précieuses ! Chaque suggestion sera lue et évaluée "
+            "par l'équipe du serveur. Votez également sur les suggestions des autres "
+            "membres avec ✅ ou ❌.\n\n"
+            "Merci de votre participation"
         ),
         color=0x5865F2,
     )
