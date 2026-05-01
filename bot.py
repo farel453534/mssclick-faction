@@ -5029,8 +5029,6 @@ async def cmd_forcemaj(interaction: discord.Interaction):
                 return
 
         general_changes, modifications = _diff_site_content(old_data, current_data)
-        if not general_changes and not modifications:
-            general_changes = ["Mise à jour détectée sur le site"]
 
         await _send_site_update(channel, general_changes, modifications)
         await interaction.followup.send(f"✅ Mise à jour détectée et postée dans <#{GDRIVE_NOTIFY_CHANNEL_ID}>.", ephemeral=True)
@@ -5038,6 +5036,72 @@ async def cmd_forcemaj(interaction: discord.Interaction):
 
     except Exception as e:
         logger.error(f"Erreur dans /forcemaj: {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+
+
+@bot.tree.command(name="testmaj", description="Simule une notification de mise à jour du règlement pour tester l'affichage.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    section="Nom de la section modifiée (défaut : 'Règles générales')",
+    ajout="Texte simulé ajouté dans la section",
+    suppression="Texte simulé supprimé de la section",
+    nouvelle_section="Simuler l'ajout d'une toute nouvelle section",
+    section_supprimee="Simuler la suppression d'une section",
+)
+async def cmd_testmaj(
+    interaction: discord.Interaction,
+    section: str = "Règles générales",
+    ajout: str = "Les joueurs doivent respecter les règles du serveur à tout moment.",
+    suppression: str = "Ancienne règle qui ne s'applique plus.",
+    nouvelle_section: str = "",
+    section_supprimee: str = "",
+):
+    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
+            ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+
+    general_changes = []
+    modifications = []
+
+    if nouvelle_section:
+        label = nouvelle_section[:70] + "…" if len(nouvelle_section) > 70 else nouvelle_section
+        general_changes.append(f'Nouvelle section : « {label} »')
+
+    if section_supprimee:
+        label = section_supprimee[:70] + "…" if len(section_supprimee) > 70 else section_supprimee
+        general_changes.append(f'Section supprimée : « {label} »')
+
+    sec_label = section[:50] + "…" if len(section) > 50 else section
+
+    if ajout:
+        preview = ajout[:80] + "…" if len(ajout) > 80 else ajout
+        modifications.append(f'[{sec_label}] Ajout : « {preview} »')
+
+    if suppression:
+        preview = suppression[:80] + "…" if len(suppression) > 80 else suppression
+        modifications.append(f'[{sec_label}] Suppression : « {preview} »')
+
+    try:
+        channel = interaction.guild.get_channel(GDRIVE_NOTIFY_CHANNEL_ID) if interaction.guild else None
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(GDRIVE_NOTIFY_CHANNEL_ID)
+            except Exception:
+                await interaction.followup.send("❌ Channel de notification introuvable.", ephemeral=True)
+                return
+
+        await _send_site_update(channel, general_changes, modifications)
+        await interaction.followup.send(
+            f"✅ Message de test posté dans <#{GDRIVE_NOTIFY_CHANNEL_ID}>.",
+            ephemeral=True
+        )
+        await log_to_db('info', f'/testmaj: test posté par {interaction.user}')
+    except Exception as e:
+        logger.error(f"Erreur dans /testmaj: {e}\n{traceback.format_exc()}")
         await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
 
 
@@ -5163,71 +5227,145 @@ GDRIVE_NOTIFY_CHANNEL_ID = 1102038156204847164
 GDRIVE_ROLE_ID = 1062740125475426405
 
 
+def _clean_text(text: str) -> str:
+    return ' '.join(text.split()).strip()
+
+
 def _parse_google_site(html: str) -> dict:
+    """
+    Parse a Google Sites page and extract structured content by section.
+    Returns {"sections": {section_name: [text, ...]}, "headings": [...], "text_blocks": [...]}
+    """
     try:
         soup = BeautifulSoup(html, 'html.parser')
     except Exception:
-        return {"headings": [], "text_blocks": []}
+        return {"sections": {}, "headings": [], "text_blocks": []}
 
-    for tag in soup(['script', 'style', 'noscript', 'meta', 'head', 'nav']):
+    # Remove non-content elements
+    for tag in soup(['script', 'style', 'noscript', 'meta', 'head', 'nav', 'footer', 'header']):
         tag.decompose()
 
-    headings = []
-    path_stack = []
+    # Try to extract embedded JSON content from Google Sites data attributes
+    sections: dict = {}
+    current_section = "Général"
+    current_blocks: list = []
+    seen_texts: set = set()
 
-    for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
-        level = int(h.name[1])
-        text = h.get_text(strip=True)
-        if not text or len(text) < 2:
+    HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
+    CONTENT_TAGS = {'p', 'li', 'td', 'blockquote', 'span', 'div'}
+
+    # Walk all elements in document order
+    for elem in soup.find_all(HEADING_TAGS | CONTENT_TAGS):
+        tag = elem.name
+
+        # Skip containers that wrap other block elements (avoid duplicates)
+        if tag in CONTENT_TAGS and elem.find(list(HEADING_TAGS | {'p', 'li', 'blockquote'})):
             continue
-        while path_stack and path_stack[-1][0] >= level:
-            path_stack.pop()
-        path_stack.append((level, text))
-        path = " -> ".join(t for _, t in path_stack)
-        headings.append({"level": level, "text": text, "path": path})
 
-    seen = set()
-    text_blocks = []
-    for elem in soup.find_all(['p', 'li', 'span', 'td']):
-        if elem.find(['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+        raw = elem.get_text(separator=' ', strip=True)
+        text = _clean_text(raw)
+
+        if not text or len(text) < 4:
             continue
-        text = elem.get_text(strip=True)
-        if text and len(text) > 10 and text not in seen:
-            seen.add(text)
-            text_blocks.append(text)
 
-    return {"headings": headings, "text_blocks": text_blocks}
+        if tag in HEADING_TAGS:
+            # Flush current section
+            if current_blocks:
+                sections.setdefault(current_section, [])
+                sections[current_section].extend(current_blocks)
+                current_blocks = []
+            current_section = text
+            seen_texts.add(text)
+        else:
+            if text not in seen_texts and len(text) > 5:
+                seen_texts.add(text)
+                current_blocks.append(text)
+
+    # Flush last section
+    if current_blocks:
+        sections.setdefault(current_section, [])
+        sections[current_section].extend(current_blocks)
+
+    # Flat lists for backward compat
+    headings = list(sections.keys())
+    text_blocks = [b for blocks in sections.values() for b in blocks]
+
+    return {"sections": sections, "headings": headings, "text_blocks": text_blocks}
 
 
 def _diff_site_content(old_data: dict, new_data: dict):
+    """
+    Compare two parsed site snapshots and return (general_changes, modifications).
+    Changes are labelled with the section name they belong to.
+    """
     general_changes = []
     modifications = []
 
-    old_headings = {h["path"]: h for h in old_data.get("headings", [])}
-    new_headings = {h["path"]: h for h in new_data.get("headings", [])}
+    old_sections = old_data.get("sections", {})
+    new_sections = new_data.get("sections", {})
 
-    for path, h in new_headings.items():
-        if path not in old_headings:
-            name = path.split(" -> ")[-1]
-            nav = path if len(path) <= 80 else "…" + path[-77:]
-            general_changes.append(f'Ajout section : "{name}" ({nav})')
+    # ── If both snapshots have section data, use detailed comparison ──
+    if old_sections or new_sections:
+        # Sections added
+        for section in new_sections:
+            if section not in old_sections:
+                label = section[:70] + "…" if len(section) > 70 else section
+                general_changes.append(f'Nouvelle section : « {label} »')
 
-    for path in old_headings:
-        if path not in new_headings:
-            name = path.split(" -> ")[-1]
-            nav = path if len(path) <= 80 else "…" + path[-77:]
-            general_changes.append(f'Suppression section : "{name}" ({nav})')
+        # Sections removed
+        for section in old_sections:
+            if section not in new_sections:
+                label = section[:70] + "…" if len(section) > 70 else section
+                general_changes.append(f'Section supprimée : « {label} »')
+
+        # Content changed inside existing sections
+        for section in new_sections:
+            if section not in old_sections:
+                continue
+            old_set = set(old_sections[section])
+            new_set = set(new_sections[section])
+
+            sec_label = section[:50] + "…" if len(section) > 50 else section
+
+            for block in list(new_set - old_set)[:4]:
+                preview = block[:80] + "…" if len(block) > 80 else block
+                modifications.append(f'[{sec_label}] Ajout : « {preview} »')
+
+            for block in list(old_set - new_set)[:4]:
+                preview = block[:80] + "…" if len(block) > 80 else block
+                modifications.append(f'[{sec_label}] Suppression : « {preview} »')
+
+        return general_changes, modifications
+
+    # ── Fallback: flat heading/text comparison (legacy snapshot format) ──
+    old_headings_raw = old_data.get("headings", [])
+    new_headings_raw = new_data.get("headings", [])
+
+    # Support both old format (list of dicts with "path") and new format (list of str)
+    def _heading_key(h):
+        return h["path"] if isinstance(h, dict) else h
+
+    old_h = {_heading_key(h) for h in old_headings_raw}
+    new_h = {_heading_key(h) for h in new_headings_raw}
+
+    for path in new_h - old_h:
+        name = path.split(" -> ")[-1] if " -> " in path else path
+        general_changes.append(f'Nouvelle section : « {name[:70]} »')
+
+    for path in old_h - new_h:
+        name = path.split(" -> ")[-1] if " -> " in path else path
+        general_changes.append(f'Section supprimée : « {name[:70]} »')
 
     old_blocks = set(old_data.get("text_blocks", []))
     new_blocks = set(new_data.get("text_blocks", []))
 
     for block in list(new_blocks - old_blocks)[:6]:
-        preview = block[:90] + "…" if len(block) > 90 else block
-        modifications.append(f'Ajout : "{preview}"')
+        preview = block[:80] + "…" if len(block) > 80 else block
+        modifications.append(f'Ajout : « {preview} »')
 
     for block in list(old_blocks - new_blocks)[:6]:
-        preview = block[:90] + "…" if len(block) > 90 else block
-        modifications.append(f'Suppression : "{preview}"')
+        preview = block[:80] + "…" if len(block) > 80 else block
+        modifications.append(f'Suppression : « {preview} »')
 
     return general_changes, modifications
 
@@ -5236,24 +5374,22 @@ async def _send_site_update(channel, general_changes, modifications):
     today = datetime.datetime.now().strftime("%d/%m/%Y")
     lines = []
 
-    lines.append(f"# <:mssclick_update:1413942207584665822> __Mise à jour Règlement {today}__ :")
+    lines.append(f"# 📋 __Mise à jour Règlement {today}__ :")
 
     if general_changes:
         lines.append("")
-        lines.append("<:mssclick_news:1413943838036197463>                  - __**Général**__")
+        lines.append("📰  - __**Général**__")
         block = "\n".join(f"- {c}" for c in general_changes)
         lines.append(f"```\n{block}\n```")
 
     if modifications:
         lines.append("")
-        lines.append("<:mssclick_rework:1413945740232888503>                  - __**Modification**__")
+        lines.append("🔧  - __**Modification**__")
         block = "\n".join(f"- {c}" for c in modifications)
         lines.append(f"```\n{block}\n```")
 
     lines.append("")
     lines.append("## __Merci d'aller lire le règlement et prendre en compte les changements.__")
-    lines.append("")
-    lines.append(f"|| <@&{GDRIVE_ROLE_ID}>  ||")
 
     message = "\n".join(lines)
     if len(message) > 1990:
@@ -5322,7 +5458,6 @@ async def check_site_updates():
 
         if not general_changes and not modifications:
             logger.info("Site monitor: changement détecté mais contenu parsé identique (JS dynamique?).")
-            general_changes = ["Mise à jour détectée sur le site"]
 
         await _send_site_update(channel, general_changes, modifications)
         await log_to_db('info', f'Site monitor: mise à jour détectée et notifiée.')
