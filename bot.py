@@ -614,10 +614,18 @@ class NexusBot(discord.Client):
             changes = []
             if before.name != after.name:
                 changes.append(f"**Nom:** `{before.name}` → `{after.name}`")
-            if hasattr(before, 'topic') and hasattr(after, 'topic') and before.topic != after.topic:
-                changes.append(f"**Sujet:** `{before.topic or 'Aucun'}` → `{after.topic or 'Aucun'}`")
-            if before.overwrites != after.overwrites:
-                changes.append("**Permissions modifiées**")
+            before_topic = before.topic or ""
+            after_topic = after.topic or ""
+            if hasattr(before, 'topic') and hasattr(after, 'topic') and before_topic != after_topic:
+                changes.append(f"**Sujet:** `{before_topic or 'Aucun'}` → `{after_topic or 'Aucun'}`")
+            before_nsfw = getattr(before, 'nsfw', None)
+            after_nsfw = getattr(after, 'nsfw', None)
+            if before_nsfw is not None and before_nsfw != after_nsfw:
+                changes.append(f"**NSFW:** `{before_nsfw}` → `{after_nsfw}`")
+            before_slowmode = getattr(before, 'slowmode_delay', None)
+            after_slowmode = getattr(after, 'slowmode_delay', None)
+            if before_slowmode is not None and before_slowmode != after_slowmode:
+                changes.append(f"**Slowmode:** `{before_slowmode}s` → `{after_slowmode}s`")
             if changes:
                 await asyncio.sleep(0.3)
                 executor_str = ""
