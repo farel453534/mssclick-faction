@@ -10,11 +10,8 @@ import logging
 import traceback
 import re
 import time as _time
-import aiohttp
-import hashlib
 import datetime
 import json
-from bs4 import BeautifulSoup
 
 try:
     from dotenv import load_dotenv
@@ -200,19 +197,6 @@ async def init_db():
                 );
             """)
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS site_monitor (
-                    id SERIAL PRIMARY KEY,
-                    url TEXT NOT NULL UNIQUE,
-                    channel_id TEXT NOT NULL,
-                    last_hash TEXT,
-                    last_content TEXT,
-                    last_checked TIMESTAMP DEFAULT NOW()
-                );
-            """)
-            await conn.execute("""
-                ALTER TABLE site_monitor ADD COLUMN IF NOT EXISTS last_content TEXT;
-            """)
-            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS suggestions_log (
                     id SERIAL PRIMARY KEY,
                     guild_id TEXT NOT NULL,
@@ -288,7 +272,6 @@ SLASH_COMMANDS = [
     {"name": "/ownerlist", "params": "", "description": "Gérer la liste des créateurs du serveur."},
     {"name": "/suggestions", "params": "", "description": "Affiche le panneau de suggestions du serveur."},
     {"name": "/logssuggestions", "params": "", "description": "Affiche les logs des suggestions dans un channel admin."},
-    {"name": "/forcemaj", "params": "", "description": "Force une vérification immédiate du site de règlement."},
 ]
 
 TEXT_COMMANDS = [
@@ -394,9 +377,6 @@ class NexusBot(discord.Client):
 
         if not process_outgoing_messages.is_running():
             process_outgoing_messages.start()
-
-        if not check_site_updates.is_running():
-            check_site_updates.start()
 
         self.add_view(SuggestionButtonView())
         await register_suggestion_views()
@@ -4965,140 +4945,6 @@ async def cmd_suggestions(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view)
 
 
-@bot.tree.command(name="forcemaj", description="Force une vérification immédiate du site de règlement.")
-@app_commands.default_permissions(administrator=True)
-async def cmd_forcemaj(interaction: discord.Interaction):
-    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
-        await interaction.response.send_message(
-            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
-            ephemeral=True
-        )
-        return
-    await interaction.response.defer(ephemeral=True)
-    if not pool:
-        await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
-        return
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {"User-Agent": "Mozilla/5.0 (compatible; NexusBot/1.0)"}
-            async with session.get(GDRIVE_SITE_URL, timeout=aiohttp.ClientTimeout(total=20), headers=headers) as resp:
-                if resp.status != 200:
-                    await interaction.followup.send(f"❌ Impossible d'accéder au site (HTTP {resp.status}).", ephemeral=True)
-                    return
-                html = await resp.text()
-
-        current_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
-        current_data = _parse_google_site(html)
-        current_content_json = json.dumps(current_data, ensure_ascii=False)
-
-        row = await pool.fetchrow(
-            "SELECT last_hash, last_content FROM site_monitor WHERE url = $1",
-            GDRIVE_SITE_URL
-        )
-
-        if row is None:
-            await pool.execute(
-                "INSERT INTO site_monitor (url, channel_id, last_hash, last_content) VALUES ($1, $2, $3, $4)",
-                GDRIVE_SITE_URL, str(GDRIVE_NOTIFY_CHANNEL_ID), current_hash, current_content_json
-            )
-            await interaction.followup.send("✅ Première vérification enregistrée. Les prochaines mises à jour seront notifiées.", ephemeral=True)
-            return
-
-        if row["last_hash"] == current_hash:
-            await interaction.followup.send("✅ Aucun changement détecté sur le site.", ephemeral=True)
-            return
-
-        old_data = {}
-        if row["last_content"]:
-            try:
-                old_data = json.loads(row["last_content"])
-            except Exception:
-                old_data = {}
-
-        await pool.execute(
-            "UPDATE site_monitor SET last_hash = $1, last_content = $2, last_checked = NOW() WHERE url = $3",
-            current_hash, current_content_json, GDRIVE_SITE_URL
-        )
-
-        channel = interaction.guild.get_channel(GDRIVE_NOTIFY_CHANNEL_ID)
-        if not channel:
-            try:
-                channel = await bot.fetch_channel(GDRIVE_NOTIFY_CHANNEL_ID)
-            except Exception:
-                await interaction.followup.send("❌ Channel de notification introuvable.", ephemeral=True)
-                return
-
-        general_changes, modifications = _diff_site_content(old_data, current_data)
-
-        await _send_site_update(channel, general_changes, modifications)
-        await interaction.followup.send(f"✅ Mise à jour détectée et postée dans <#{GDRIVE_NOTIFY_CHANNEL_ID}>.", ephemeral=True)
-        await log_to_db('info', f'/forcemaj: mise à jour publiée par {interaction.user}')
-
-    except Exception as e:
-        logger.error(f"Erreur dans /forcemaj: {e}\n{traceback.format_exc()}")
-        await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
-
-
-@bot.tree.command(name="testmaj", description="Simule une notification de mise à jour du règlement pour tester l'affichage.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(
-    section="Chemin de la section modifiée, ex: Accueil -> Fiche de Suivi (défaut : 'Règles générales')",
-    ajout="Texte simulé ajouté dans la section",
-    ajout2="Second texte ajouté (optionnel)",
-    nouvelle_section="Simuler l'ajout d'une toute nouvelle section",
-)
-async def cmd_testmaj(
-    interaction: discord.Interaction,
-    section: str = "Accueil -> Règles générales",
-    ajout: str = "Les joueurs doivent respecter les règles du serveur à tout moment.",
-    ajout2: str = "",
-    nouvelle_section: str = "",
-):
-    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
-        await interaction.response.send_message(
-            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
-            ephemeral=True
-        )
-        return
-    await interaction.response.defer(ephemeral=True)
-
-    general_changes = []
-    modifications = []
-
-    if nouvelle_section:
-        label = nouvelle_section[:80] + "…" if len(nouvelle_section) > 80 else nouvelle_section
-        general_changes.append(f'Nouvelle section : « {label} »')
-
-    sec_label = section[:60] + "…" if len(section) > 60 else section
-
-    if ajout:
-        preview = ajout[:80] + "…" if len(ajout) > 80 else ajout
-        modifications.append(f'[{sec_label}] Ajout : « {preview} »')
-
-    if ajout2:
-        preview = ajout2[:80] + "…" if len(ajout2) > 80 else ajout2
-        modifications.append(f'[{sec_label}] Ajout : « {preview} »')
-
-    try:
-        channel = interaction.guild.get_channel(GDRIVE_NOTIFY_CHANNEL_ID) if interaction.guild else None
-        if not channel:
-            try:
-                channel = await bot.fetch_channel(GDRIVE_NOTIFY_CHANNEL_ID)
-            except Exception:
-                await interaction.followup.send("❌ Channel de notification introuvable.", ephemeral=True)
-                return
-
-        await _send_site_update(channel, general_changes, modifications)
-        await interaction.followup.send(
-            f"✅ Message de test posté dans <#{GDRIVE_NOTIFY_CHANNEL_ID}>.",
-            ephemeral=True
-        )
-        await log_to_db('info', f'/testmaj: test posté par {interaction.user}')
-    except Exception as e:
-        logger.error(f"Erreur dans /testmaj: {e}\n{traceback.format_exc()}")
-        await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
-
-
 @bot.tree.command(name="logssuggestions", description="Affiche les logs des suggestions dans un channel admin.")
 @app_commands.default_permissions(administrator=True)
 async def cmd_logssuggestions(interaction: discord.Interaction):
@@ -5216,239 +5062,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         pass
 
 
-GDRIVE_SITE_URL = "https://sites.google.com/view/mssclick-reglement-faction?usp=sharing"
-GDRIVE_NOTIFY_CHANNEL_ID = 1102038156204847164
-GDRIVE_ROLE_ID = 1062740125475426405
-
-
-def _clean_text(text: str) -> str:
-    return ' '.join(text.split()).strip()
-
-
-def _parse_google_site(html: str) -> dict:
-    """
-    Parse a Google Sites page and extract structured content by section.
-    Section keys are full hierarchical paths like "Accueil -> Fiche de Suivi".
-    Returns {"sections": {path: [text, ...]}, "headings": [...], "text_blocks": [...]}
-    """
-    try:
-        soup = BeautifulSoup(html, 'html.parser')
-    except Exception:
-        return {"sections": {}, "headings": [], "text_blocks": []}
-
-    for tag in soup(['script', 'style', 'noscript', 'meta', 'head', 'nav', 'footer', 'header']):
-        tag.decompose()
-
-    sections: dict = {}
-    current_path = "Général"
-    current_blocks: list = []
-    seen_texts: set = set()
-
-    # Stack of (level, text) to build hierarchical paths
-    path_stack: list = []
-
-    HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
-    CONTENT_TAGS = {'p', 'li', 'td', 'blockquote', 'span', 'div'}
-
-    for elem in soup.find_all(HEADING_TAGS | CONTENT_TAGS):
-        tag = elem.name
-
-        if tag in CONTENT_TAGS and elem.find(list(HEADING_TAGS | {'p', 'li', 'blockquote'})):
-            continue
-
-        raw = elem.get_text(separator=' ', strip=True)
-        text = _clean_text(raw)
-
-        if not text or len(text) < 4:
-            continue
-
-        if tag in HEADING_TAGS:
-            # Flush current section
-            if current_blocks:
-                sections.setdefault(current_path, [])
-                sections[current_path].extend(current_blocks)
-                current_blocks = []
-
-            level = int(tag[1])
-            # Pop stack entries of same or deeper level
-            while path_stack and path_stack[-1][0] >= level:
-                path_stack.pop()
-            path_stack.append((level, text))
-
-            current_path = " -> ".join(t for _, t in path_stack)
-            seen_texts.add(text)
-        else:
-            if text not in seen_texts and len(text) > 5:
-                seen_texts.add(text)
-                current_blocks.append(text)
-
-    # Flush last section
-    if current_blocks:
-        sections.setdefault(current_path, [])
-        sections[current_path].extend(current_blocks)
-
-    headings = list(sections.keys())
-    text_blocks = [b for blocks in sections.values() for b in blocks]
-
-    return {"sections": sections, "headings": headings, "text_blocks": text_blocks}
-
-
-def _diff_site_content(old_data: dict, new_data: dict):
-    """
-    Compare two parsed site snapshots and return (general_changes, modifications).
-    Only reports additions — suppressions are ignored.
-    Section labels use the full hierarchical path (e.g. "Accueil -> Fiche de Suivi").
-    """
-    general_changes = []
-    modifications = []
-
-    old_sections = old_data.get("sections", {})
-    new_sections = new_data.get("sections", {})
-
-    # ── Section-aware comparison ──
-    if old_sections or new_sections:
-        # New sections only (no suppression reporting)
-        for section in new_sections:
-            if section not in old_sections:
-                label = section[:80] + "…" if len(section) > 80 else section
-                general_changes.append(f'Nouvelle section : « {label} »')
-
-        # Content added inside existing sections
-        for section in new_sections:
-            if section not in old_sections:
-                continue
-            old_set = set(old_sections[section])
-            new_set = set(new_sections[section])
-
-            added = list(new_set - old_set)
-            if not added:
-                continue
-
-            sec_label = section[:60] + "…" if len(section) > 60 else section
-            for block in added[:4]:
-                preview = block[:80] + "…" if len(block) > 80 else block
-                modifications.append(f'[{sec_label}] Ajout : « {preview} »')
-
-        return general_changes, modifications
-
-    # ── Fallback: flat comparison (legacy snapshot without sections) ──
-    old_headings_raw = old_data.get("headings", [])
-    new_headings_raw = new_data.get("headings", [])
-
-    def _heading_key(h):
-        return h["path"] if isinstance(h, dict) else h
-
-    old_h = {_heading_key(h) for h in old_headings_raw}
-    new_h = {_heading_key(h) for h in new_headings_raw}
-
-    for path in new_h - old_h:
-        general_changes.append(f'Nouvelle section : « {path[:80]} »')
-
-    old_blocks = set(old_data.get("text_blocks", []))
-    new_blocks = set(new_data.get("text_blocks", []))
-
-    for block in list(new_blocks - old_blocks)[:6]:
-        preview = block[:80] + "…" if len(block) > 80 else block
-        modifications.append(f'Ajout : « {preview} »')
-
-    return general_changes, modifications
-
-
-async def _send_site_update(channel, general_changes, modifications):
-    today = datetime.datetime.now().strftime("%d/%m/%Y")
-    lines = []
-
-    lines.append(f"# 📋 __Mise à jour Règlement {today}__ :")
-
-    if general_changes:
-        lines.append("")
-        lines.append("📰  - __**Général**__")
-        block = "\n".join(f"- {c}" for c in general_changes)
-        lines.append(f"```\n{block}\n```")
-
-    if modifications:
-        lines.append("")
-        lines.append("🔧  - __**Modification**__")
-        block = "\n".join(f"- {c}" for c in modifications)
-        lines.append(f"```\n{block}\n```")
-
-    lines.append("")
-    lines.append("## __Merci d'aller lire le règlement et prendre en compte les changements.__")
-
-    message = "\n".join(lines)
-    if len(message) > 1990:
-        message = message[:1987] + "…"
-    await channel.send(message)
-
-
-@tasks.loop(minutes=10)
-async def check_site_updates():
-    if not pool:
-        return
-    try:
-        async with aiohttp.ClientSession() as session:
-            try:
-                headers = {"User-Agent": "Mozilla/5.0 (compatible; NexusBot/1.0)"}
-                async with session.get(GDRIVE_SITE_URL, timeout=aiohttp.ClientTimeout(total=20), headers=headers) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"Site monitor: HTTP {resp.status}")
-                        return
-                    html = await resp.text()
-            except Exception as e:
-                logger.error(f"Site monitor fetch error: {e}")
-                return
-
-        current_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
-        current_data = _parse_google_site(html)
-        current_content_json = json.dumps(current_data, ensure_ascii=False)
-
-        row = await pool.fetchrow(
-            "SELECT last_hash, last_content FROM site_monitor WHERE url = $1",
-            GDRIVE_SITE_URL
-        )
-
-        if row is None:
-            await pool.execute(
-                "INSERT INTO site_monitor (url, channel_id, last_hash, last_content) VALUES ($1, $2, $3, $4)",
-                GDRIVE_SITE_URL, str(GDRIVE_NOTIFY_CHANNEL_ID), current_hash, current_content_json
-            )
-            logger.info("Site monitor: première vérification enregistrée.")
-            return
-
-        if row["last_hash"] == current_hash:
-            return
-
-        old_data = {}
-        if row["last_content"]:
-            try:
-                old_data = json.loads(row["last_content"])
-            except Exception:
-                old_data = {}
-
-        await pool.execute(
-            "UPDATE site_monitor SET last_hash = $1, last_content = $2, last_checked = NOW() WHERE url = $3",
-            current_hash, current_content_json, GDRIVE_SITE_URL
-        )
-
-        channel = bot.get_channel(GDRIVE_NOTIFY_CHANNEL_ID)
-        if not channel:
-            try:
-                channel = await bot.fetch_channel(GDRIVE_NOTIFY_CHANNEL_ID)
-            except Exception as e:
-                logger.error(f"Site monitor: channel introuvable ({e})")
-                return
-
-        general_changes, modifications = _diff_site_content(old_data, current_data)
-
-        if not general_changes and not modifications:
-            logger.info("Site monitor: changement détecté mais contenu parsé identique (JS dynamique?).")
-
-        await _send_site_update(channel, general_changes, modifications)
-        await log_to_db('info', f'Site monitor: mise à jour détectée et notifiée.')
-        logger.info("Site monitor: mise à jour notifiée.")
-
-    except Exception as e:
-        logger.error(f"Erreur dans check_site_updates: {e}\n{traceback.format_exc()}")
 
 
 @tasks.loop(seconds=5)
