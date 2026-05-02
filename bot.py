@@ -4886,9 +4886,63 @@ async def gerants_command(interaction: discord.Interaction):
         ))
 
         view.add_item(container)
-        await interaction.response.send_message(view=view)
+        await interaction.response.send_message("✅ Envoyé.", ephemeral=True)
+        await interaction.channel.send(view=view)
     except Exception as e:
         logger.error(f"Error in /gerants: {traceback.format_exc()}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
+@bot.tree.command(name="reglement", description="Afficher le règlement du serveur.")
+async def reglement_command(interaction: discord.Interaction):
+    try:
+        view = discord.ui.LayoutView(timeout=None)
+        container = discord.ui.Container(accent_colour=0x2b2d31)
+
+        gallery = discord.ui.MediaGallery()
+        gallery.add_item(media="https://i.imgur.com/q5eMiRV.png")
+        container.add_item(gallery)
+
+        container.add_item(discord.ui.TextDisplay(
+            "## 📜 RÈGLEMENT DU SERVEUR - FSC 📜"
+        ))
+        container.add_item(discord.ui.TextDisplay(
+            "> Merci de prendre le temps de lire et respecter le règlement du serveur. "
+            "Cela permet à tout le monde de profiter d'une expérience de jeu agréable et équilibrée. "
+            "Le non-respect des règles peut entraîner des sanctions."
+        ))
+
+        container.add_item(discord.ui.Separator())
+
+        reglement_button = discord.ui.Button(
+            label="Règlement",
+            style=discord.ButtonStyle.link,
+            url="https://sites.google.com/view/mssclick-reglement-faction?usp=sharing"
+        )
+        section = discord.ui.Section(
+            "🔗 **Accès au règlement complet :**",
+            accessory=reglement_button
+        )
+        container.add_item(section)
+
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.TextDisplay(
+            "✅ **Note :** Pensez à regarder le règlement une fois par semaine afin de vous assurer d'être bien à jour sur celui-ci."
+        ))
+        container.add_item(discord.ui.TextDisplay(
+            "🔴 Ignorer le règlement n'est pas une excuse en cas d'infraction et nous partons du principe qu'en vous connectant sur le serveur vous le maitrisez sur le bout des doigts."
+        ))
+
+        view.add_item(container)
+        await interaction.response.send_message("✅ Envoyé.", ephemeral=True)
+        await interaction.channel.send(view=view)
+    except Exception as e:
+        logger.error(f"Error in /reglement: {traceback.format_exc()}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
