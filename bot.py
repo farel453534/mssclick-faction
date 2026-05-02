@@ -379,10 +379,44 @@ intents.members = True
 intents.moderation = True
 
 
+class NexusCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            return True
+        try:
+            cmd = interaction.command
+            is_admincap = (
+                cmd is not None
+                and hasattr(cmd, "parent")
+                and cmd.parent is not None
+                and getattr(cmd.parent, "name", None) == "admincap"
+            )
+            if is_admincap:
+                allowed = await is_whitelisted(interaction.guild, interaction.user.id)
+                error_msg = "❌ Seuls les membres de la ownerlist et whitelist peuvent utiliser cette commande."
+            else:
+                allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
+                error_msg = "❌ Seuls les membres de la ownerlist peuvent utiliser les commandes du bot."
+        except Exception as e:
+            logger.error(f"interaction_check error: {e}\n{traceback.format_exc()}")
+            try:
+                await interaction.response.send_message("❌ Erreur interne lors de la vérification des droits.", ephemeral=True)
+            except Exception:
+                pass
+            return False
+        if not allowed:
+            try:
+                await interaction.response.send_message(error_msg, ephemeral=True)
+            except Exception:
+                pass
+            return False
+        return True
+
+
 class NexusBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)
+        self.tree = NexusCommandTree(self)
         self.synced = False
 
     async def on_ready(self):
@@ -2075,18 +2109,6 @@ class NexusBot(discord.Client):
 bot = NexusBot()
 
 
-@bot.tree.interaction_check
-async def global_ownerlist_check(interaction: discord.Interaction) -> bool:
-    if interaction.guild is None:
-        return True
-    is_ol = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-    if not is_ol:
-        await interaction.response.send_message(
-            "❌ Seuls les membres de la ownerlist peuvent utiliser les commandes du bot.",
-            ephemeral=True
-        )
-        return False
-    return True
 
 
 async def is_bot_owner_or_server_owner(guild, user_id):
@@ -5329,13 +5351,6 @@ class RecensementButtonView(discord.ui.View):
 @bot.tree.command(name="recpanel", description="Envoyer le panneau de recensement de captures dans ce salon.")
 @app_commands.default_permissions(administrator=True)
 async def cmd_recpanel(interaction: discord.Interaction):
-    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
-        await interaction.response.send_message(
-            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
-            ephemeral=True,
-        )
-        return
-
     await interaction.response.defer(ephemeral=True)
 
     embed = discord.Embed(
@@ -5372,10 +5387,6 @@ captures_group = app_commands.Group(
 @captures_group.command(name="voir", description="Voir toutes les captures d'un membre.")
 @app_commands.describe(membre="Le membre dont voir les captures")
 async def captures_voir(interaction: discord.Interaction, membre: discord.Member):
-    if not await is_whitelisted(interaction.guild, interaction.user.id):
-        await interaction.response.send_message("❌ Réservé aux membres de la ownerlist et whitelist.", ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
 
     if not pool:
@@ -5428,10 +5439,6 @@ async def captures_voir(interaction: discord.Interaction, membre: discord.Member
 @captures_group.command(name="supprimer", description="Supprimer une capture par son ID de base de données.")
 @app_commands.describe(capture_id="L'ID de la capture (visible avec /captures voir)")
 async def captures_supprimer(interaction: discord.Interaction, capture_id: int):
-    if not await is_whitelisted(interaction.guild, interaction.user.id):
-        await interaction.response.send_message("❌ Réservé aux membres de la ownerlist et whitelist.", ephemeral=True)
-        return
-
     await interaction.response.defer(ephemeral=True)
 
     if not pool:
@@ -5588,9 +5595,6 @@ class CaptureAddModal(discord.ui.Modal, title="Ajouter une capture manuellement"
 @captures_group.command(name="ajouter", description="Ajouter une capture manuellement pour un membre.")
 @app_commands.describe(membre="La victime de la capture")
 async def captures_ajouter(interaction: discord.Interaction, membre: discord.Member):
-    if not await is_whitelisted(interaction.guild, interaction.user.id):
-        await interaction.response.send_message("❌ Réservé aux membres de la ownerlist et whitelist.", ephemeral=True)
-        return
     await interaction.response.send_modal(CaptureAddModal(victim=membre))
 
 
