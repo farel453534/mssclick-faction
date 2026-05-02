@@ -4838,32 +4838,55 @@ async def info_command(interaction: discord.Interaction, user: discord.Member):
 @bot.tree.command(name="gerants", description="Afficher les gérants whitelist des factions.")
 async def gerants_command(interaction: discord.Interaction):
     try:
-        description = (
+        view = discord.ui.LayoutView(timeout=None)
+        container = discord.ui.Container(accent_colour=0x2b2d31)
+
+        gallery = discord.ui.MediaGallery()
+        gallery.add_item(media="https://i.imgur.com/nKuTsvY.png")
+        container.add_item(gallery)
+
+        container.add_item(discord.ui.TextDisplay(
             "# __Gérants de toutes les factions__\n"
-            "> <@1413486076332605481> & <@404799720305983497>\n\n"
+            "> <@1413486076332605481> & <@404799720305983497>"
+        ))
+
+        container.add_item(discord.ui.TextDisplay(
             "## AURORS\n"
-            "> <@1413486076332605481> et <@565773187116302346>\n\n"
+            "> <@1413486076332605481> et <@565773187116302346>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
             "## MANGEMORT\n"
-            "> <@1413486076332605481> et <@484798244996644864> & <@1045815146511081542>\n\n"
+            "> <@1413486076332605481> et <@484798244996644864> & <@1045815146511081542>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
             "## VAMPIRE\n"
-            "> <@879458572986105887>\n\n"
+            "> <@879458572986105887>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
             "## MINISTERE\n"
-            "> <@665228481654947853>\n\n"
+            "> <@665228481654947853>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
             "## MAGE-INDEPENDANT\n"
-            "> <@665228481654947853>\n\n"
+            "> <@665228481654947853>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
             "## ORDRE DU PHENIX\n"
-            "> <@380059243451121664>\n\n"
+            "> <@380059243451121664>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
             "## PROFESSEUR\n"
-            "> <@685885648762044449> et <@118006132500463624>\n"
-            "\n──────────────────────────────────────\n"
+            "> <@685885648762044449> et <@118006132500463624>"
+        ))
+
+        container.add_item(discord.ui.Separator())
+
+        container.add_item(discord.ui.TextDisplay(
             "Les gérants WL restent à votre disposition pour toute question ou demande."
-        )
-        embed = discord.Embed(
-            description=description,
-            color=0x2b2d31
-        )
-        embed.set_image(url="https://i.imgur.com/nKuTsvY.png")
-        await interaction.response.send_message(embed=embed)
+        ))
+
+        view.add_item(container)
+        await interaction.response.send_message(view=view)
     except Exception as e:
         logger.error(f"Error in /gerants: {traceback.format_exc()}")
         try:
