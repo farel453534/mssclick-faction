@@ -5663,14 +5663,6 @@ class CaptureAddModal(discord.ui.Modal, title="Ajouter une capture manuellement"
             await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
             return
 
-        channel = guild.get_channel(RECENSEMENT_CHANNEL_ID)
-        if not channel:
-            try:
-                channel = await bot.fetch_channel(RECENSEMENT_CHANNEL_ID)
-            except Exception:
-                await interaction.followup.send("❌ Salon de recensement introuvable.", ephemeral=True)
-                return
-
         victim_id = str(self._victim.id)
         victime_display = self._victim.mention
 
@@ -5685,38 +5677,24 @@ class CaptureAddModal(discord.ui.Modal, title="Ajouter une capture manuellement"
 
         echanger = self.echanger_contre.value or "—"
 
-        embed = discord.Embed(
-            title="📋 Recensement de capture",
-            color=0x2b2d31,
-            timestamp=datetime.datetime.utcnow(),
-        )
-        embed.add_field(name="__• Date :__", value=self.date_event.value or "—", inline=False)
-        embed.add_field(name="__• Lieu :__", value=self.lieu.value or "—", inline=False)
-        embed.add_field(name="__• Victime :__", value=victime_display, inline=False)
-        embed.add_field(name="__• Agresseur :__", value=self.agresseur.value or "—", inline=False)
-        embed.add_field(name="__• L'action (résumé) :__", value=self.action_resume.value or "—", inline=False)
-        embed.add_field(name="__• Echanger contre :__", value=echanger, inline=False)
-        embed.add_field(name="__• Capture numéro :__", value=str(capture_num), inline=False)
-        embed.set_footer(text=f"Ajouté manuellement par {interaction.user} • {interaction.user.id} · ⏳ En attente de validation")
-
         try:
-            msg = await channel.send(embed=embed, view=CaptureValidationView())
             await pool.execute(
-                """INSERT INTO recensement_pending
+                """INSERT INTO recensement
                    (guild_id, message_id, channel_id, user_id, user_name,
                     date_event, lieu, victime, agresseur, action_resume,
                     echanger_contre, capture_numero)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
-                str(guild.id), str(msg.id), str(channel.id),
+                str(guild.id), None, None,
                 str(interaction.user.id), str(interaction.user),
                 self.date_event.value, self.lieu.value, victime_display,
                 self.agresseur.value, self.action_resume.value,
-                self.echanger_contre.value, str(capture_num),
+                echanger, str(capture_num),
             )
             await interaction.followup.send(
-                f"✅ Capture soumise ! Elle sera enregistrée une fois validée.", ephemeral=True
+                f"✅ Capture n°**{capture_num}** enregistrée pour {self._victim.mention}.",
+                ephemeral=True
             )
-            await log_to_db('info', f'Capture pending #{capture_num} ajoutée manuellement par {interaction.user} dans {guild.name}')
+            await log_to_db('info', f'Capture #{capture_num} ajoutée manuellement par {interaction.user} dans {guild.name}')
         except Exception as e:
             logger.error(f"Erreur ajout capture manuelle : {e}\n{traceback.format_exc()}")
             await interaction.followup.send("❌ Une erreur est survenue lors de l'ajout.", ephemeral=True)
