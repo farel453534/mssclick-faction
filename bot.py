@@ -4839,7 +4839,7 @@ async def info_command(interaction: discord.Interaction, user: discord.Member):
 async def gerants_command(interaction: discord.Interaction):
     try:
         description = (
-            "# Gérants de toutes les factions\n"
+            "# __Gérants de toutes les factions__\n"
             "> <@1413486076332605481> & <@404799720305983497>\n\n"
             "## AURORS\n"
             "> <@1413486076332605481> et <@565773187116302346>\n\n"
@@ -4854,10 +4854,9 @@ async def gerants_command(interaction: discord.Interaction):
             "## ORDRE DU PHENIX\n"
             "> <@380059243451121664>\n\n"
             "## PROFESSEUR\n"
-            "> <@415225558612443136> et <@685885648762044449>"
+            "> <@685885648762044449> et <@118006132500463624>"
         )
         embed = discord.Embed(
-            title="Gérants Whitelist Factions",
             description=description,
             color=0x2b2d31
         )
