@@ -1796,11 +1796,6 @@ class NexusBot(discord.Client):
                         await log_to_db('warn', f'Toxicity blocked: {user} in {message.guild.name}')
                         return
 
-        if self.user.mentioned_in(message) and not message.mention_everyone:
-            await message.channel.send(f"{message.author.mention} utilise /help pour m'utiliser.")
-            await log_to_db('info', f'Bot mentioned by {message.author} in #{message.channel}')
-            return
-
         if message.content.strip().startswith(".") and message.guild:
             if not await is_owner_or_ownerlist(message.guild, message.author.id):
                 embed = discord.Embed(description="❌ Seuls les membres de la ownerlist peuvent utiliser les commandes du bot.", color=0x2b2d31)
