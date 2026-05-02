@@ -240,6 +240,24 @@ async def init_db():
                     log_channel_id TEXT
                 );
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS recensement_pending (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    channel_id TEXT,
+                    user_id TEXT NOT NULL,
+                    user_name TEXT,
+                    date_event TEXT,
+                    lieu TEXT,
+                    victime TEXT,
+                    agresseur TEXT,
+                    action_resume TEXT,
+                    echanger_contre TEXT,
+                    capture_numero TEXT,
+                    submitted_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
             existing_keys = await conn.fetchval("SELECT COUNT(*) FROM license_keys")
             if existing_keys == 0:
                 import secrets as sec
@@ -444,6 +462,7 @@ class NexusBot(discord.Client):
         self.add_view(SuggestionButtonView())
         await register_suggestion_views()
         self.add_view(RecensementButtonView())
+        self.add_view(CaptureValidationView())
 
     async def on_guild_join(self, guild):
         try:
@@ -5150,6 +5169,7 @@ async def cmd_logssuggestions(interaction: discord.Interaction):
 
 
 RECENSEMENT_CHANNEL_ID = 1182401421040160905
+CAPTURE_VALIDATOR_ID = 1413486076332605481
 
 
 def _extract_user_id_from_mention(text: str) -> str | None:
@@ -5175,6 +5195,81 @@ async def _get_capture_number(guild_id: str, victime_raw: str) -> int:
         return int(count or 0) + 1
     except Exception:
         return 1
+
+
+class CaptureValidationView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Valider",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+        custom_id="cap_approve",
+    )
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != CAPTURE_VALIDATOR_ID:
+            await interaction.response.send_message("❌ Tu n'es pas autorisé à valider les captures.", ephemeral=True)
+            return
+        if not pool:
+            await interaction.response.send_message("❌ Base de données non connectée.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        row = await pool.fetchrow(
+            "SELECT * FROM recensement_pending WHERE message_id = $1",
+            str(interaction.message.id)
+        )
+        if not row:
+            await interaction.followup.send("❌ Capture introuvable ou déjà traitée.", ephemeral=True)
+            return
+
+        await pool.execute(
+            """INSERT INTO recensement
+               (guild_id, message_id, channel_id, user_id, user_name,
+                date_event, lieu, victime, agresseur, action_resume,
+                echanger_contre, capture_numero)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+            row["guild_id"], row["message_id"], row["channel_id"],
+            row["user_id"], row["user_name"],
+            row["date_event"], row["lieu"], row["victime"],
+            row["agresseur"], row["action_resume"],
+            row["echanger_contre"], row["capture_numero"],
+        )
+        await pool.execute(
+            "DELETE FROM recensement_pending WHERE message_id = $1",
+            str(interaction.message.id)
+        )
+
+        embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
+        old_footer = embed.footer.text or ""
+        embed.set_footer(text=f"{old_footer} · ✅ Validée par {interaction.user.display_name}")
+        await interaction.message.edit(embed=embed, view=None)
+        await log_to_db('info', f'Capture validée par {interaction.user} (msg {interaction.message.id})')
+
+    @discord.ui.button(
+        label="Refuser",
+        style=discord.ButtonStyle.danger,
+        emoji="❌",
+        custom_id="cap_reject",
+    )
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != CAPTURE_VALIDATOR_ID:
+            await interaction.response.send_message("❌ Tu n'es pas autorisé à refuser les captures.", ephemeral=True)
+            return
+        if not pool:
+            await interaction.response.send_message("❌ Base de données non connectée.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        await pool.execute(
+            "DELETE FROM recensement_pending WHERE message_id = $1",
+            str(interaction.message.id)
+        )
+        await interaction.message.delete()
+        await log_to_db('info', f'Capture refusée par {interaction.user} (msg {interaction.message.id})')
 
 
 class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
@@ -5256,13 +5351,13 @@ class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
         embed.add_field(name="__• L'action (résumé) :__", value=self.action_resume.value or "—", inline=False)
         embed.add_field(name="__• Echanger contre :__", value=echanger, inline=False)
         embed.add_field(name="__• Capture numéro :__", value=str(capture_num), inline=False)
-        embed.set_footer(text=f"Soumis par {interaction.user} • {interaction.user.id}")
+        embed.set_footer(text=f"Soumis par {interaction.user} • {interaction.user.id} · ⏳ En attente de validation")
 
         try:
-            msg = await channel.send(embed=embed)
+            msg = await channel.send(embed=embed, view=CaptureValidationView())
             try:
                 await pool.execute(
-                    """INSERT INTO recensement
+                    """INSERT INTO recensement_pending
                        (guild_id, message_id, channel_id, user_id, user_name,
                         date_event, lieu, victime, agresseur, action_resume,
                         echanger_contre, capture_numero)
@@ -5274,11 +5369,11 @@ class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
                     self.echanger_contre.value, str(capture_num),
                 )
             except Exception as db_err:
-                logger.error(f"Erreur sauvegarde recensement en DB : {db_err}")
+                logger.error(f"Erreur sauvegarde recensement_pending en DB : {db_err}")
             await interaction.followup.send(
-                f"✅ Recensement n°**{capture_num}** soumis avec succès !", ephemeral=True
+                f"✅ Recensement soumis ! Il sera enregistré une fois validé.", ephemeral=True
             )
-            await log_to_db('info', f'Recensement #{capture_num} créé par {interaction.user} dans {guild.name}')
+            await log_to_db('info', f'Recensement pending #{capture_num} créé par {interaction.user} dans {guild.name}')
         except Exception as e:
             logger.error(f"Erreur envoi recensement : {e}\n{traceback.format_exc()}")
             await interaction.followup.send("❌ Une erreur est survenue lors de l'envoi.", ephemeral=True)
@@ -5410,8 +5505,12 @@ async def captures_voir(interaction: discord.Interaction, membre: str):
         return
 
     rows = await pool.fetch(
-        "SELECT * FROM recensement WHERE guild_id = $1 AND victime LIKE $2 ORDER BY submitted_at ASC",
-        str(interaction.guild.id), f"%{membre}%"
+        "SELECT *, 'validée' AS statut FROM recensement WHERE guild_id = $1 AND victime LIKE $2 "
+        "UNION ALL "
+        "SELECT *, 'en attente' AS statut FROM recensement_pending WHERE guild_id = $3 AND victime LIKE $4 "
+        "ORDER BY submitted_at ASC",
+        str(interaction.guild.id), f"%{membre}%",
+        str(interaction.guild.id), f"%{membre}%",
     )
 
     if not rows:
@@ -5421,23 +5520,28 @@ async def captures_voir(interaction: discord.Interaction, membre: str):
         return
 
     mention_str = f"<@{membre}>" if membre.isdigit() else membre_display
+    validees = [r for r in rows if r["statut"] == "validée"]
+    en_attente = [r for r in rows if r["statut"] == "en attente"]
     embed = discord.Embed(
         title=f"📋 Captures de {membre_display}",
-        description=f"{mention_str} — **{len(rows)}** capture(s) au total",
+        description=(
+            f"{mention_str} — **{len(validees)}** validée(s) · **{len(en_attente)}** en attente"
+        ),
         color=0x2b2d31,
         timestamp=datetime.datetime.utcnow(),
     )
 
-    for i, row in enumerate(rows[:25], 1):
+    for row in rows[:25]:
         date_str = row["date_event"] or "—"
         lieu_str = row["lieu"] or "—"
         agresseur_str = row["agresseur"] or "—"
         action_str = (row["action_resume"] or "—")[:80] + ("…" if len(row["action_resume"] or "") > 80 else "")
         echanger_str = row["echanger_contre"] or "—"
         submitted = f"<t:{int(row['submitted_at'].timestamp())}:d>" if row.get("submitted_at") else "—"
+        badge = "✅" if row["statut"] == "validée" else "⏳"
 
         embed.add_field(
-            name=f"__Capture n°{row['capture_numero']} — ID DB : `{row['id']}`__",
+            name=f"__{badge} Capture n°{row['capture_numero']} — ID DB : `{row['id']}`__",
             value=(
                 f"**Date :** {date_str} · **Lieu :** {lieu_str}\n"
                 f"**Agresseur :** {agresseur_str}\n"
@@ -5466,13 +5570,20 @@ async def captures_supprimer(interaction: discord.Interaction, capture_id: int):
         "SELECT * FROM recensement WHERE id = $1 AND guild_id = $2",
         capture_id, str(interaction.guild.id)
     )
+    table_used = "recensement"
+    if not row:
+        row = await pool.fetchrow(
+            "SELECT * FROM recensement_pending WHERE id = $1 AND guild_id = $2",
+            capture_id, str(interaction.guild.id)
+        )
+        table_used = "recensement_pending"
     if not row:
         await interaction.followup.send(
-            f"❌ Aucune capture avec l'ID `{capture_id}` sur ce serveur.", ephemeral=True
+            f"❌ Aucune capture avec l'ID `{capture_id}` sur ce serveur (ni validée ni en attente).", ephemeral=True
         )
         return
 
-    await pool.execute("DELETE FROM recensement WHERE id = $1", capture_id)
+    await pool.execute(f"DELETE FROM {table_used} WHERE id = $1", capture_id)
 
     if row.get("message_id") and row.get("channel_id"):
         try:
@@ -5484,9 +5595,10 @@ async def captures_supprimer(interaction: discord.Interaction, capture_id: int):
         except Exception:
             pass
 
+    statut = "en attente" if table_used == "recensement_pending" else "validée"
     embed = discord.Embed(
         description=(
-            f"✅ Capture n°**{row['capture_numero']}** (ID `{capture_id}`) supprimée.\n"
+            f"✅ Capture n°**{row['capture_numero']}** (ID `{capture_id}`, {statut}) supprimée.\n"
             f"Victime : {row['victime'] or '—'} · Date : {row['date_event'] or '—'}"
         ),
         color=0x2b2d31,
@@ -5574,12 +5686,12 @@ class CaptureAddModal(discord.ui.Modal, title="Ajouter une capture manuellement"
         embed.add_field(name="__• L'action (résumé) :__", value=self.action_resume.value or "—", inline=False)
         embed.add_field(name="__• Echanger contre :__", value=echanger, inline=False)
         embed.add_field(name="__• Capture numéro :__", value=str(capture_num), inline=False)
-        embed.set_footer(text=f"Ajouté manuellement par {interaction.user} • {interaction.user.id}")
+        embed.set_footer(text=f"Ajouté manuellement par {interaction.user} • {interaction.user.id} · ⏳ En attente de validation")
 
         try:
-            msg = await channel.send(embed=embed)
+            msg = await channel.send(embed=embed, view=CaptureValidationView())
             await pool.execute(
-                """INSERT INTO recensement
+                """INSERT INTO recensement_pending
                    (guild_id, message_id, channel_id, user_id, user_name,
                     date_event, lieu, victime, agresseur, action_resume,
                     echanger_contre, capture_numero)
@@ -5591,9 +5703,9 @@ class CaptureAddModal(discord.ui.Modal, title="Ajouter une capture manuellement"
                 self.echanger_contre.value, str(capture_num),
             )
             await interaction.followup.send(
-                f"✅ Capture n°**{capture_num}** ajoutée pour {self._victim.mention}.", ephemeral=True
+                f"✅ Capture soumise ! Elle sera enregistrée une fois validée.", ephemeral=True
             )
-            await log_to_db('info', f'Capture #{capture_num} ajoutée manuellement par {interaction.user} dans {guild.name}')
+            await log_to_db('info', f'Capture pending #{capture_num} ajoutée manuellement par {interaction.user} dans {guild.name}')
         except Exception as e:
             logger.error(f"Erreur ajout capture manuelle : {e}\n{traceback.format_exc()}")
             await interaction.followup.send("❌ Une erreur est survenue lors de l'ajout.", ephemeral=True)
