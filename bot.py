@@ -3379,8 +3379,7 @@ class PanelView(discord.ui.View):
         self.add_item(next_btn)
 
     async def interaction_check(self, interaction: discord.Interaction):
-        is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-        if not is_allowed:
+        if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser ce menu.", ephemeral=True)
             return False
         return True
@@ -3532,8 +3531,7 @@ class ProtectionDetailView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def interaction_check(self, interaction: discord.Interaction):
-        is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
-        if not is_allowed:
+        if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Vous n'êtes pas autorisé à utiliser ce menu.", ephemeral=True)
             return False
         return True
@@ -3550,6 +3548,7 @@ class ProtectionDetailView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def toggle_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         prot = self.protections_data.get(self.protection_key)
         new_state = not (prot and prot['enabled'])
         await set_protection(self.guild_id, self.protection_key, enabled=new_state)
@@ -3560,11 +3559,12 @@ class ProtectionDetailView(discord.ui.View):
         mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
         embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
         self._build_items()
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.message.edit(embed=embed, view=self)
         state_label = "activé" if new_state else "désactivé"
         await log_to_db('info', f'{interaction.user} {state_label} {mod["label"]} dans {interaction.guild.name}')
 
     async def whitelist_bypass_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         prot = self.protections_data.get(self.protection_key)
         current_wb = prot.get('whitelist_bypass', False) if prot else False
         new_wb = not current_wb
@@ -3576,7 +3576,7 @@ class ProtectionDetailView(discord.ui.View):
         mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
         embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
         self._build_items()
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.message.edit(embed=embed, view=self)
         status = "activé" if new_wb else "désactivé"
         await log_to_db('info', f'{interaction.user} {status} whitelist bypass for {mod["label"]} in {interaction.guild.name}')
 
@@ -3587,9 +3587,10 @@ class ProtectionDetailView(discord.ui.View):
         await self._auto_assign_log_channel(interaction)
 
     async def _auto_assign_log_channel(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         expected_channel_name = PROTECTION_TO_LOG_CHANNEL.get(self.protection_key)
         if not expected_channel_name:
-            await interaction.response.send_message("Aucun salon de logs associé à cette protection.", ephemeral=True)
+            await interaction.followup.send("Aucun salon de logs associé à cette protection.", ephemeral=True)
             return
 
         guild = interaction.guild
@@ -3599,7 +3600,7 @@ class ProtectionDetailView(discord.ui.View):
             log_ch = discord.utils.get(category.text_channels, name=expected_channel_name)
 
         if not log_ch:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Le salon `{expected_channel_name}` n'existe pas. Utilisez `/logs` d'abord pour créer les salons de logs.",
                 ephemeral=True
             )
@@ -3615,7 +3616,7 @@ class ProtectionDetailView(discord.ui.View):
             mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
             embed = build_protection_detail_embed(mod, self.protections_data.get(self.protection_key), guild)
             self._build_items()
-            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.message.edit(embed=embed, view=self)
             await log_to_db('info', f'{interaction.user} removed log channel for {mod["label"]} in {guild.name}')
         else:
             await set_protection(self.guild_id, self.protection_key, log_channel_id=str(log_ch.id))
@@ -3626,10 +3627,11 @@ class ProtectionDetailView(discord.ui.View):
             mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
             embed = build_protection_detail_embed(mod, self.protections_data.get(self.protection_key), guild)
             self._build_items()
-            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.message.edit(embed=embed, view=self)
             await log_to_db('info', f'{interaction.user} set log channel to {log_ch.name} for {mod["label"]} in {guild.name}')
 
     async def timeout_duration_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         value = interaction.data['values'][0]
         await set_protection(self.guild_id, self.protection_key, timeout_duration=value)
         if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
@@ -3639,11 +3641,12 @@ class ProtectionDetailView(discord.ui.View):
         mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
         embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
         self._build_items()
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.message.edit(embed=embed, view=self)
         td_label = next((td['label'] for td in TIMEOUT_DURATION_OPTIONS if td['value'] == value), value)
         await log_to_db('info', f'{interaction.user} set timeout duration for {mod["label"]} to {td_label} in {interaction.guild.name}')
 
     async def punishment_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         value = interaction.data['values'][0]
         await set_protection(self.guild_id, self.protection_key, punishment=value)
         if self.protection_key not in self.protections_data or not self.protections_data[self.protection_key]:
@@ -3653,7 +3656,7 @@ class ProtectionDetailView(discord.ui.View):
         mod = next((m for m in PROTECTION_MODULES if m['key'] == self.protection_key), None)
         embed = build_protection_detail_embed(mod, self.protections_data[self.protection_key], interaction.guild)
         self._build_items()
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.message.edit(embed=embed, view=self)
         p_label = next((p['label'] for p in PUNISHMENT_OPTIONS if p['value'] == value), value)
         await log_to_db('info', f'{interaction.user} changed punishment for {mod["label"]} to {p_label} in {interaction.guild.name}')
 
