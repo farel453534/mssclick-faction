@@ -215,6 +215,31 @@ async def init_db():
             await conn.execute("""
                 ALTER TABLE suggestions_log ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'en_attente';
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS recensement (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    message_id TEXT,
+                    channel_id TEXT,
+                    user_id TEXT NOT NULL,
+                    user_name TEXT,
+                    date_event TEXT,
+                    lieu TEXT,
+                    victime TEXT,
+                    agresseur TEXT,
+                    action_resume TEXT,
+                    echanger_contre TEXT,
+                    capture_numero TEXT,
+                    submitted_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS recensement_config (
+                    guild_id TEXT PRIMARY KEY,
+                    channel_id TEXT,
+                    log_channel_id TEXT
+                );
+            """)
             existing_keys = await conn.fetchval("SELECT COUNT(*) FROM license_keys")
             if existing_keys == 0:
                 import secrets as sec
@@ -272,6 +297,7 @@ SLASH_COMMANDS = [
     {"name": "/ownerlist", "params": "", "description": "Gérer la liste des créateurs du serveur."},
     {"name": "/suggestions", "params": "", "description": "Affiche le panneau de suggestions du serveur."},
     {"name": "/logssuggestions", "params": "", "description": "Affiche les logs des suggestions dans un channel admin."},
+    {"name": "/recpanel", "params": "", "description": "Créer le panneau de recensement de captures dans ce salon."},
 ]
 
 TEXT_COMMANDS = [
@@ -380,6 +406,7 @@ class NexusBot(discord.Client):
 
         self.add_view(SuggestionButtonView())
         await register_suggestion_views()
+        self.add_view(RecensementButtonView())
 
     async def on_guild_join(self, guild):
         try:
@@ -5100,6 +5127,262 @@ async def cmd_logssuggestions(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Erreur dans /logssuggestions: {e}\n{traceback.format_exc()}")
         await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+
+
+RECENSEMENT_CHANNEL_ID = 1182401421040160905
+
+
+def _extract_user_id_from_mention(text: str) -> str | None:
+    m = re.search(r'<@!?(\d+)>', text)
+    return m.group(1) if m else None
+
+
+async def _get_capture_number(guild_id: str, victime_raw: str) -> int:
+    if not pool:
+        return 1
+    victim_id = _extract_user_id_from_mention(victime_raw)
+    try:
+        if victim_id:
+            count = await pool.fetchval(
+                "SELECT COUNT(*) FROM recensement WHERE guild_id = $1 AND victime LIKE $2",
+                guild_id, f"%{victim_id}%"
+            )
+        else:
+            count = await pool.fetchval(
+                "SELECT COUNT(*) FROM recensement WHERE guild_id = $1 AND LOWER(victime) = LOWER($2)",
+                guild_id, victime_raw.strip()
+            )
+        return int(count or 0) + 1
+    except Exception:
+        return 1
+
+
+class RecensementModal2(discord.ui.Modal, title="Recensement — Partie 2/2"):
+    echanger_contre = discord.ui.TextInput(
+        label="Echanger contre",
+        placeholder="Que souhaitez-vous en échange ? (optionnel)",
+        style=discord.TextStyle.paragraph,
+        max_length=300,
+        required=False,
+    )
+
+    def __init__(self, first_data: dict):
+        super().__init__()
+        self.first_data = first_data
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+
+        if not pool:
+            await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
+            return
+
+        channel = guild.get_channel(RECENSEMENT_CHANNEL_ID)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(RECENSEMENT_CHANNEL_ID)
+            except Exception:
+                await interaction.followup.send("❌ Salon de recensement introuvable (ID invalide ou bot non présent).", ephemeral=True)
+                return
+
+        d = self.first_data
+        echanger = self.echanger_contre.value or "—"
+
+        capture_num = await _get_capture_number(str(guild.id), d["victime"])
+
+        victim_id = _extract_user_id_from_mention(d["victime"])
+        victime_display = d["victime"] if d["victime"] else "—"
+
+        embed = discord.Embed(
+            title="📋 Recensement de capture",
+            color=0x2b2d31,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.add_field(name="• Date :", value=d["date_event"] or "—", inline=False)
+        embed.add_field(name="• Lieu :", value=d["lieu"] or "—", inline=False)
+        embed.add_field(name="• Victime :", value=victime_display, inline=False)
+        embed.add_field(name="• Agresseur :", value=d["agresseur"] or "—", inline=False)
+        embed.add_field(name="• L'action (résumé) :", value=d["action_resume"] or "—", inline=False)
+        embed.add_field(name="• Echanger contre :", value=echanger, inline=False)
+        embed.add_field(name="• Capture numéro :", value=str(capture_num), inline=False)
+        embed.set_footer(text=f"Soumis par {interaction.user} • {interaction.user.id}")
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+
+        ping_content = f"<@{victim_id}>" if victim_id else None
+
+        try:
+            msg = await channel.send(content=ping_content, embed=embed)
+            try:
+                await pool.execute(
+                    """INSERT INTO recensement
+                       (guild_id, message_id, channel_id, user_id, user_name,
+                        date_event, lieu, victime, agresseur, action_resume,
+                        echanger_contre, capture_numero)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                    str(guild.id), str(msg.id), str(channel.id),
+                    str(interaction.user.id), str(interaction.user),
+                    d["date_event"], d["lieu"], d["victime"],
+                    d["agresseur"], d["action_resume"],
+                    self.echanger_contre.value, str(capture_num),
+                )
+            except Exception as db_err:
+                logger.error(f"Erreur sauvegarde recensement en DB : {db_err}")
+            await interaction.followup.send(
+                f"✅ Recensement n°**{capture_num}** soumis avec succès !", ephemeral=True
+            )
+            await log_to_db('info', f'Recensement #{capture_num} créé par {interaction.user} dans {guild.name}')
+        except Exception as e:
+            logger.error(f"Erreur envoi recensement : {e}")
+            await interaction.followup.send("❌ Une erreur est survenue lors de l'envoi.", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"Erreur RecensementModal2 : {error}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
+class RecensementModal1(discord.ui.Modal, title="Recensement — Partie 1/2"):
+    def __init__(self, victim_mention: str = ""):
+        super().__init__()
+        self._date_input = discord.ui.TextInput(
+            label="Date",
+            placeholder="Ex : 01/05/2026 à 16h30",
+            max_length=100,
+            required=True,
+        )
+        self._lieu_input = discord.ui.TextInput(
+            label="Lieu",
+            placeholder="Ex : Forêt interdite, Pré-au-lard…",
+            max_length=150,
+            required=True,
+        )
+        self._victime_input = discord.ui.TextInput(
+            label="Victime",
+            default=victim_mention,
+            max_length=200,
+            required=True,
+        )
+        self._agresseur_input = discord.ui.TextInput(
+            label="Agresseur",
+            placeholder="Nom du personnage agresseur",
+            max_length=150,
+            required=True,
+        )
+        self._action_input = discord.ui.TextInput(
+            label="L'action (résumé)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Décrivez brièvement l'action commise…",
+            max_length=500,
+            required=True,
+        )
+        self.add_item(self._date_input)
+        self.add_item(self._lieu_input)
+        self.add_item(self._victime_input)
+        self.add_item(self._agresseur_input)
+        self.add_item(self._action_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        first_data = {
+            "date_event":    self._date_input.value,
+            "lieu":          self._lieu_input.value,
+            "victime":       self._victime_input.value,
+            "agresseur":     self._agresseur_input.value,
+            "action_resume": self._action_input.value,
+        }
+        await interaction.response.send_modal(RecensementModal2(first_data=first_data))
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"Erreur RecensementModal1 : {error}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
+class VictimSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.select(
+        cls=discord.ui.UserSelect,
+        placeholder="Recherchez et sélectionnez la victime…",
+        min_values=1,
+        max_values=1,
+    )
+    async def select_victim(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        victim = select.values[0]
+        modal = RecensementModal1(victim_mention=victim.mention)
+        await interaction.response.send_modal(modal)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class RecensementButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Soumettre un recensement",
+        style=discord.ButtonStyle.danger,
+        emoji="📋",
+        custom_id="recensement_open",
+    )
+    async def open_recensement(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = VictimSelectView()
+        await interaction.response.send_message(
+            "**Étape préliminaire — Sélectionnez la victime :**\n"
+            "Recherchez son nom dans la liste ci-dessous, puis le formulaire s'ouvrira automatiquement.",
+            view=view,
+            ephemeral=True,
+        )
+
+
+@bot.tree.command(name="recpanel", description="Envoyer le panneau de recensement de captures dans ce salon.")
+@app_commands.default_permissions(administrator=True)
+async def cmd_recpanel(interaction: discord.Interaction):
+    if interaction.guild and not await can_use_bot(interaction.guild, interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Seuls les membres de la ownerlist peuvent utiliser cette commande.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    embed = discord.Embed(
+        title="📋 Recensement de Captures",
+        description=(
+            "Vous avez une capture à signaler ?\n"
+            "Cliquez sur le bouton ci-dessous pour commencer.\n\n"
+            "**Déroulement :**\n"
+            "**0 —** Sélectionnez la victime dans la liste des membres\n"
+            "**1/2 —** Date · Lieu · Victime (pré-remplie) · Agresseur · L'action\n"
+            "**2/2 —** Echanger contre\n\n"
+            "Le numéro de capture est attribué **automatiquement**.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━"
+        ),
+        color=0x2b2d31,
+    )
+    embed.set_footer(text="Les recensements seront publiés dans le salon dédié.")
+
+    view = RecensementButtonView()
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.followup.send(
+        f"✅ Panneau posté dans {interaction.channel.mention}.\nLes soumissions seront publiées dans <#{RECENSEMENT_CHANNEL_ID}>.",
+        ephemeral=True,
+    )
+    await log_to_db('info', f'/recpanel utilisé par {interaction.user} dans {interaction.guild.name}')
 
 
 @bot.tree.error
