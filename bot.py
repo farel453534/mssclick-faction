@@ -4854,15 +4854,16 @@ async def gerants_command(interaction: discord.Interaction):
             "## ORDRE DU PHENIX\n"
             "> <@380059243451121664>\n\n"
             "## PROFESSEUR\n"
-            "> <@685885648762044449> et <@118006132500463624>"
+            "> <@685885648762044449> et <@118006132500463624>\n"
+            "\n___\n"
+            "Les gérants WL restent à votre disposition pour toute demande, question ou besoin d'accompagnement. N'hésitez pas à les contacter, ils sont là pour vous aider et veiller au bon déroulement de votre expérience de jeu."
         )
-        banner_embed = discord.Embed(color=0x2b2d31)
-        banner_embed.set_image(url="https://i.imgur.com/nKuTsvY.png")
-        content_embed = discord.Embed(
+        embed = discord.Embed(
             description=description,
             color=0x2b2d31
         )
-        await interaction.response.send_message(embeds=[banner_embed, content_embed])
+        embed.set_image(url="https://i.imgur.com/nKuTsvY.png")
+        await interaction.response.send_message(embed=embed)
     except Exception as e:
         logger.error(f"Error in /gerants: {traceback.format_exc()}")
         try:
