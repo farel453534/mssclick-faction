@@ -298,6 +298,9 @@ SLASH_COMMANDS = [
     {"name": "/suggestions", "params": "", "description": "Affiche le panneau de suggestions du serveur."},
     {"name": "/logssuggestions", "params": "", "description": "Affiche les logs des suggestions dans un channel admin."},
     {"name": "/recpanel", "params": "", "description": "Créer le panneau de recensement de captures dans ce salon."},
+    {"name": "/admincap voir", "params": "[membre]", "description": "Voir toutes les captures d'un membre (ownerlist/whitelist)."},
+    {"name": "/admincap supprimer", "params": "[id]", "description": "Supprimer une capture par son ID (ownerlist/whitelist)."},
+    {"name": "/admincap ajouter", "params": "[membre]", "description": "Ajouter une capture manuellement (ownerlist/whitelist)."},
 ]
 
 TEXT_COMMANDS = [
@@ -5229,18 +5232,17 @@ class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
             color=0x2b2d31,
             timestamp=datetime.datetime.utcnow(),
         )
-        embed.add_field(name="• Date :", value=self.date_event.value or "—", inline=False)
-        embed.add_field(name="• Lieu :", value=self.lieu.value or "—", inline=False)
-        embed.add_field(name="• Victime :", value=victime_display, inline=False)
-        embed.add_field(name="• Agresseur :", value=self.agresseur.value or "—", inline=False)
-        embed.add_field(name="• L'action (résumé) :", value=self.action_resume.value or "—", inline=False)
-        embed.add_field(name="• Echanger contre :", value=echanger, inline=False)
-        embed.add_field(name="• Capture numéro :", value=str(capture_num), inline=False)
+        embed.add_field(name="__• Date :__", value=self.date_event.value or "—", inline=False)
+        embed.add_field(name="__• Lieu :__", value=self.lieu.value or "—", inline=False)
+        embed.add_field(name="__• Victime :__", value=victime_display, inline=False)
+        embed.add_field(name="__• Agresseur :__", value=self.agresseur.value or "—", inline=False)
+        embed.add_field(name="__• L'action (résumé) :__", value=self.action_resume.value or "—", inline=False)
+        embed.add_field(name="__• Echanger contre :__", value=echanger, inline=False)
+        embed.add_field(name="__• Capture numéro :__", value=str(capture_num), inline=False)
         embed.set_footer(text=f"Soumis par {interaction.user} • {interaction.user.id}")
-        embed.set_thumbnail(url=self._victim.display_avatar.url)
 
         try:
-            msg = await channel.send(content=f"<@{victim_id}>", embed=embed)
+            msg = await channel.send(embed=embed)
             try:
                 await pool.execute(
                     """INSERT INTO recensement
@@ -5358,6 +5360,241 @@ async def cmd_recpanel(interaction: discord.Interaction):
         ephemeral=True,
     )
     await log_to_db('info', f'/recpanel utilisé par {interaction.user} dans {interaction.guild.name}')
+
+
+captures_group = app_commands.Group(
+    name="admincap",
+    description="Gérer les captures du serveur (ownerlist/whitelist).",
+    default_permissions=discord.Permissions(administrator=True),
+)
+
+
+@captures_group.command(name="voir", description="Voir toutes les captures d'un membre.")
+@app_commands.describe(membre="Le membre dont voir les captures")
+async def captures_voir(interaction: discord.Interaction, membre: discord.Member):
+    if not await is_whitelisted(interaction.guild, interaction.user.id):
+        await interaction.response.send_message("❌ Réservé aux membres de la ownerlist et whitelist.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    if not pool:
+        await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
+        return
+
+    rows = await pool.fetch(
+        "SELECT * FROM recensement WHERE guild_id = $1 AND victime LIKE $2 ORDER BY submitted_at ASC",
+        str(interaction.guild.id), f"%{membre.id}%"
+    )
+
+    if not rows:
+        await interaction.followup.send(
+            f"Aucune capture trouvée pour {membre.mention}.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"📋 Captures de {membre.display_name}",
+        description=f"{membre.mention} — **{len(rows)}** capture(s) au total",
+        color=0x2b2d31,
+        timestamp=datetime.datetime.utcnow(),
+    )
+
+    for i, row in enumerate(rows[:25], 1):
+        date_str = row["date_event"] or "—"
+        lieu_str = row["lieu"] or "—"
+        agresseur_str = row["agresseur"] or "—"
+        action_str = (row["action_resume"] or "—")[:80] + ("…" if len(row["action_resume"] or "") > 80 else "")
+        echanger_str = row["echanger_contre"] or "—"
+        submitted = f"<t:{int(row['submitted_at'].timestamp())}:d>" if row.get("submitted_at") else "—"
+
+        embed.add_field(
+            name=f"__Capture n°{row['capture_numero']} — ID DB : `{row['id']}`__",
+            value=(
+                f"**Date :** {date_str} · **Lieu :** {lieu_str}\n"
+                f"**Agresseur :** {agresseur_str}\n"
+                f"**Action :** {action_str}\n"
+                f"**Échange :** {echanger_str} · **Soumis :** {submitted}"
+            ),
+            inline=False,
+        )
+
+    if len(rows) > 25:
+        embed.set_footer(text=f"Affichage limité aux 25 premières captures sur {len(rows)}.")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@captures_group.command(name="supprimer", description="Supprimer une capture par son ID de base de données.")
+@app_commands.describe(capture_id="L'ID de la capture (visible avec /captures voir)")
+async def captures_supprimer(interaction: discord.Interaction, capture_id: int):
+    if not await is_whitelisted(interaction.guild, interaction.user.id):
+        await interaction.response.send_message("❌ Réservé aux membres de la ownerlist et whitelist.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    if not pool:
+        await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
+        return
+
+    row = await pool.fetchrow(
+        "SELECT * FROM recensement WHERE id = $1 AND guild_id = $2",
+        capture_id, str(interaction.guild.id)
+    )
+    if not row:
+        await interaction.followup.send(
+            f"❌ Aucune capture avec l'ID `{capture_id}` sur ce serveur.", ephemeral=True
+        )
+        return
+
+    await pool.execute("DELETE FROM recensement WHERE id = $1", capture_id)
+
+    if row.get("message_id") and row.get("channel_id"):
+        try:
+            ch = interaction.guild.get_channel(int(row["channel_id"]))
+            if not ch:
+                ch = await bot.fetch_channel(int(row["channel_id"]))
+            msg = await ch.fetch_message(int(row["message_id"]))
+            await msg.delete()
+        except Exception:
+            pass
+
+    embed = discord.Embed(
+        description=(
+            f"✅ Capture n°**{row['capture_numero']}** (ID `{capture_id}`) supprimée.\n"
+            f"Victime : {row['victime'] or '—'} · Date : {row['date_event'] or '—'}"
+        ),
+        color=0x2b2d31,
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    await log_to_db('info', f'Capture #{capture_id} supprimée par {interaction.user} dans {interaction.guild.name}')
+
+
+class CaptureAddModal(discord.ui.Modal, title="Ajouter une capture manuellement"):
+    date_event = discord.ui.TextInput(
+        label="Date",
+        placeholder="Ex : 01/05/2026 à 16h30",
+        max_length=100,
+        required=True,
+    )
+    lieu = discord.ui.TextInput(
+        label="Lieu",
+        placeholder="Ex : Forêt interdite, Pré-au-lard…",
+        max_length=150,
+        required=True,
+    )
+    agresseur = discord.ui.TextInput(
+        label="Agresseur",
+        placeholder="Nom du personnage agresseur",
+        max_length=150,
+        required=True,
+    )
+    action_resume = discord.ui.TextInput(
+        label="L'action (résumé)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Décrivez brièvement l'action commise…",
+        max_length=500,
+        required=True,
+    )
+    echanger_contre = discord.ui.TextInput(
+        label="Echanger contre",
+        placeholder="Optionnel",
+        max_length=300,
+        required=False,
+    )
+
+    def __init__(self, victim: discord.Member):
+        super().__init__()
+        self._victim = victim
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+
+        if not pool:
+            await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
+            return
+
+        channel = guild.get_channel(RECENSEMENT_CHANNEL_ID)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(RECENSEMENT_CHANNEL_ID)
+            except Exception:
+                await interaction.followup.send("❌ Salon de recensement introuvable.", ephemeral=True)
+                return
+
+        victim_id = str(self._victim.id)
+        victime_display = self._victim.mention
+
+        try:
+            count = await pool.fetchval(
+                "SELECT COUNT(*) FROM recensement WHERE guild_id = $1 AND victime LIKE $2",
+                str(guild.id), f"%{victim_id}%"
+            ) or 0
+            capture_num = int(count) + 1
+        except Exception:
+            capture_num = 1
+
+        echanger = self.echanger_contre.value or "—"
+
+        embed = discord.Embed(
+            title="📋 Recensement de capture",
+            color=0x2b2d31,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.add_field(name="__• Date :__", value=self.date_event.value or "—", inline=False)
+        embed.add_field(name="__• Lieu :__", value=self.lieu.value or "—", inline=False)
+        embed.add_field(name="__• Victime :__", value=victime_display, inline=False)
+        embed.add_field(name="__• Agresseur :__", value=self.agresseur.value or "—", inline=False)
+        embed.add_field(name="__• L'action (résumé) :__", value=self.action_resume.value or "—", inline=False)
+        embed.add_field(name="__• Echanger contre :__", value=echanger, inline=False)
+        embed.add_field(name="__• Capture numéro :__", value=str(capture_num), inline=False)
+        embed.set_footer(text=f"Ajouté manuellement par {interaction.user} • {interaction.user.id}")
+
+        try:
+            msg = await channel.send(embed=embed)
+            await pool.execute(
+                """INSERT INTO recensement
+                   (guild_id, message_id, channel_id, user_id, user_name,
+                    date_event, lieu, victime, agresseur, action_resume,
+                    echanger_contre, capture_numero)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                str(guild.id), str(msg.id), str(channel.id),
+                str(interaction.user.id), str(interaction.user),
+                self.date_event.value, self.lieu.value, victime_display,
+                self.agresseur.value, self.action_resume.value,
+                self.echanger_contre.value, str(capture_num),
+            )
+            await interaction.followup.send(
+                f"✅ Capture n°**{capture_num}** ajoutée pour {self._victim.mention}.", ephemeral=True
+            )
+            await log_to_db('info', f'Capture #{capture_num} ajoutée manuellement par {interaction.user} dans {guild.name}')
+        except Exception as e:
+            logger.error(f"Erreur ajout capture manuelle : {e}\n{traceback.format_exc()}")
+            await interaction.followup.send("❌ Une erreur est survenue lors de l'ajout.", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"Erreur CaptureAddModal : {error}\n{traceback.format_exc()}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
+@captures_group.command(name="ajouter", description="Ajouter une capture manuellement pour un membre.")
+@app_commands.describe(membre="La victime de la capture")
+async def captures_ajouter(interaction: discord.Interaction, membre: discord.Member):
+    if not await is_whitelisted(interaction.guild, interaction.user.id):
+        await interaction.response.send_message("❌ Réservé aux membres de la ownerlist et whitelist.", ephemeral=True)
+        return
+    await interaction.response.send_modal(CaptureAddModal(victim=membre))
+
+
+bot.tree.add_command(captures_group)
 
 
 @bot.tree.error
