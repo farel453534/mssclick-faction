@@ -5254,7 +5254,8 @@ class CaptureValidationView(discord.ui.View):
 
         embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
         old_footer = embed.footer.text or ""
-        embed.set_footer(text=f"{old_footer} · ✅ Validée par {interaction.user.display_name}")
+        base = old_footer.split(" · ⏳")[0].split(" · ✅")[0]
+        embed.set_footer(text=f"{base} · ✅ Validée par {interaction.user.display_name}")
         await interaction.message.edit(embed=embed, view=None)
         await log_to_db('info', f'Capture validée par {interaction.user} (msg {interaction.message.id})')
 
