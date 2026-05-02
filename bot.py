@@ -4856,12 +4856,13 @@ async def gerants_command(interaction: discord.Interaction):
             "## PROFESSEUR\n"
             "> <@685885648762044449> et <@118006132500463624>"
         )
-        embed = discord.Embed(
+        banner_embed = discord.Embed(color=0x2b2d31)
+        banner_embed.set_image(url="https://i.imgur.com/nKuTsvY.png")
+        content_embed = discord.Embed(
             description=description,
             color=0x2b2d31
         )
-        embed.set_image(url="https://i.imgur.com/nKuTsvY.png")
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embeds=[banner_embed, content_embed])
     except Exception as e:
         logger.error(f"Error in /gerants: {traceback.format_exc()}")
         try:
