@@ -3187,6 +3187,8 @@ TIMEOUT_DURATION_OPTIONS = [
 
 ITEMS_PER_PAGE = 5
 
+PROTECTION_TO_LOG_CHANNEL = {m['key']: GENERAL_LOG_CHANNEL for m in PROTECTION_MODULES}
+
 
 async def get_protection(guild_id, key):
     if not pool:
