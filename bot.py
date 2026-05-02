@@ -4835,6 +4835,35 @@ async def info_command(interaction: discord.Interaction, user: discord.Member):
             pass
 
 
+@bot.tree.command(name="gerants", description="Afficher les gérants whitelist des factions.")
+async def gerants_command(interaction: discord.Interaction):
+    try:
+        description = (
+            "**Gérants de toutes les factions** : <@1413486076332605481> & <@404799720305983497>\n\n"
+            "> **__AURORS__** : <@1413486076332605481> et <@565773187116302346>\n"
+            "> **__MANGEMORT__** : <@1413486076332605481> et <@484798244996644864> & <@1045815146511081542>\n"
+            "> **__VAMPIRE__** : <@879458572986105887>\n"
+            "> **__MINISTERE__** : <@665228481654947853>\n"
+            "> **__MAGE-INDEPENDANT__** : <@665228481654947853>\n"
+            "> **__ORDRE DU PHENIX__** : <@380059243451121664>\n"
+            "> **__PROFESSEUR__** : <@415225558612443136> et <@685885648762044449>"
+        )
+        embed = discord.Embed(
+            title="Gérants Whitelist Factions",
+            description=description,
+            color=0x2b2d31
+        )
+        embed.set_image(url="https://i.imgur.com/JwXXtAv.png")
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        logger.error(f"Error in /gerants: {traceback.format_exc()}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
+        except Exception:
+            pass
+
+
 @bot.tree.command(name="help", description="Afficher la liste des commandes du bot.")
 async def help_command(interaction: discord.Interaction):
     try:
