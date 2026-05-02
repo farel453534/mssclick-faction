@@ -5237,7 +5237,7 @@ class RecensementModal2(discord.ui.Modal, title="Recensement — Partie 2/2"):
             await interaction.followup.send("❌ Une erreur est survenue lors de l'envoi.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        logger.error(f"Erreur RecensementModal2 : {error}")
+        logger.error(f"Erreur RecensementModal2 : {error}\n{traceback.format_exc()}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
@@ -5248,57 +5248,55 @@ class RecensementModal2(discord.ui.Modal, title="Recensement — Partie 2/2"):
 
 
 class RecensementModal1(discord.ui.Modal, title="Recensement — Partie 1/2"):
+    date_event = discord.ui.TextInput(
+        label="Date",
+        placeholder="Ex : 01/05/2026 à 16h30",
+        max_length=100,
+        required=True,
+    )
+    lieu = discord.ui.TextInput(
+        label="Lieu",
+        placeholder="Ex : Forêt interdite, Pré-au-lard…",
+        max_length=150,
+        required=True,
+    )
+    victime = discord.ui.TextInput(
+        label="Victime",
+        placeholder="Mention ou nom du personnage",
+        max_length=200,
+        required=True,
+    )
+    agresseur = discord.ui.TextInput(
+        label="Agresseur",
+        placeholder="Nom du personnage agresseur",
+        max_length=150,
+        required=True,
+    )
+    action_resume = discord.ui.TextInput(
+        label="L'action (résumé)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Décrivez brièvement l'action commise…",
+        max_length=500,
+        required=True,
+    )
+
     def __init__(self, victim_mention: str = ""):
         super().__init__()
-        self._date_input = discord.ui.TextInput(
-            label="Date",
-            placeholder="Ex : 01/05/2026 à 16h30",
-            max_length=100,
-            required=True,
-        )
-        self._lieu_input = discord.ui.TextInput(
-            label="Lieu",
-            placeholder="Ex : Forêt interdite, Pré-au-lard…",
-            max_length=150,
-            required=True,
-        )
-        self._victime_input = discord.ui.TextInput(
-            label="Victime",
-            default=victim_mention,
-            max_length=200,
-            required=True,
-        )
-        self._agresseur_input = discord.ui.TextInput(
-            label="Agresseur",
-            placeholder="Nom du personnage agresseur",
-            max_length=150,
-            required=True,
-        )
-        self._action_input = discord.ui.TextInput(
-            label="L'action (résumé)",
-            style=discord.TextStyle.paragraph,
-            placeholder="Décrivez brièvement l'action commise…",
-            max_length=500,
-            required=True,
-        )
-        self.add_item(self._date_input)
-        self.add_item(self._lieu_input)
-        self.add_item(self._victime_input)
-        self.add_item(self._agresseur_input)
-        self.add_item(self._action_input)
+        if victim_mention:
+            self.victime.default = victim_mention
 
     async def on_submit(self, interaction: discord.Interaction):
         first_data = {
-            "date_event":    self._date_input.value,
-            "lieu":          self._lieu_input.value,
-            "victime":       self._victime_input.value,
-            "agresseur":     self._agresseur_input.value,
-            "action_resume": self._action_input.value,
+            "date_event":    self.date_event.value,
+            "lieu":          self.lieu.value,
+            "victime":       self.victime.value,
+            "agresseur":     self.agresseur.value,
+            "action_resume": self.action_resume.value,
         }
         await interaction.response.send_modal(RecensementModal2(first_data=first_data))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        logger.error(f"Erreur RecensementModal1 : {error}")
+        logger.error(f"Erreur RecensementModal1 : {error}\n{traceback.format_exc()}")
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
