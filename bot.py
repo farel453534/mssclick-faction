@@ -5189,21 +5189,28 @@ class RecensementModal2(discord.ui.Modal, title="Recensement — Partie 2/2"):
         d = self.first_data
         echanger = self.echanger_contre.value or "—"
 
-        capture_num = await _get_capture_number(str(guild.id), d["victime"])
+        victim_id = d.get("victim_id")
+        victime_display = d.get("victime") or "—"
 
-        victim_id = _extract_user_id_from_mention(d["victime"])
-        victime_display = d["victime"] if d["victime"] else "—"
+        if victim_id and pool:
+            count = await pool.fetchval(
+                "SELECT COUNT(*) FROM recensement WHERE guild_id = $1 AND victime LIKE $2",
+                str(guild.id), f"%{victim_id}%"
+            ) or 0
+            capture_num = int(count) + 1
+        else:
+            capture_num = await _get_capture_number(str(guild.id), victime_display)
 
         embed = discord.Embed(
             title="📋 Recensement de capture",
             color=0x2b2d31,
             timestamp=datetime.datetime.utcnow(),
         )
-        embed.add_field(name="• Date :", value=d["date_event"] or "—", inline=False)
-        embed.add_field(name="• Lieu :", value=d["lieu"] or "—", inline=False)
+        embed.add_field(name="• Date :", value=d.get("date_event") or "—", inline=False)
+        embed.add_field(name="• Lieu :", value=d.get("lieu") or "—", inline=False)
         embed.add_field(name="• Victime :", value=victime_display, inline=False)
-        embed.add_field(name="• Agresseur :", value=d["agresseur"] or "—", inline=False)
-        embed.add_field(name="• L'action (résumé) :", value=d["action_resume"] or "—", inline=False)
+        embed.add_field(name="• Agresseur :", value=d.get("agresseur") or "—", inline=False)
+        embed.add_field(name="• L'action (résumé) :", value=d.get("action_resume") or "—", inline=False)
         embed.add_field(name="• Echanger contre :", value=echanger, inline=False)
         embed.add_field(name="• Capture numéro :", value=str(capture_num), inline=False)
         embed.set_footer(text=f"Soumis par {interaction.user} • {interaction.user.id}")
@@ -5260,12 +5267,6 @@ class RecensementModal1(discord.ui.Modal, title="Recensement — Partie 1/2"):
         max_length=150,
         required=True,
     )
-    victime = discord.ui.TextInput(
-        label="Victime",
-        placeholder="Mention ou nom du personnage",
-        max_length=200,
-        required=True,
-    )
     agresseur = discord.ui.TextInput(
         label="Agresseur",
         placeholder="Nom du personnage agresseur",
@@ -5280,16 +5281,17 @@ class RecensementModal1(discord.ui.Modal, title="Recensement — Partie 1/2"):
         required=True,
     )
 
-    def __init__(self, victim_mention: str = ""):
+    def __init__(self, victim: discord.Member):
         super().__init__()
-        if victim_mention:
-            self.victime.default = victim_mention
+        self._victim = victim
 
     async def on_submit(self, interaction: discord.Interaction):
         first_data = {
             "date_event":    self.date_event.value,
             "lieu":          self.lieu.value,
-            "victime":       self.victime.value,
+            "victime":       self._victim.mention,
+            "victim_id":     str(self._victim.id),
+            "victime_name":  str(self._victim),
             "agresseur":     self.agresseur.value,
             "action_resume": self.action_resume.value,
         }
@@ -5317,9 +5319,19 @@ class VictimSelectView(discord.ui.View):
         max_values=1,
     )
     async def select_victim(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        victim = select.values[0]
-        modal = RecensementModal1(victim_mention=victim.mention)
-        await interaction.response.send_modal(modal)
+        try:
+            victim = select.values[0]
+            modal = RecensementModal1(victim=victim)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            logger.error(f"Erreur VictimSelectView : {e}\n{traceback.format_exc()}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
+            except Exception:
+                pass
 
     async def on_timeout(self):
         for item in self.children:
@@ -5365,7 +5377,7 @@ async def cmd_recpanel(interaction: discord.Interaction):
             "Cliquez sur le bouton ci-dessous pour commencer.\n\n"
             "**Déroulement :**\n"
             "**0 —** Sélectionnez la victime dans la liste des membres\n"
-            "**1/2 —** Date · Lieu · Victime (pré-remplie) · Agresseur · L'action\n"
+            "**1/2 —** Date · Lieu · Agresseur · L'action\n"
             "**2/2 —** Echanger contre\n\n"
             "Le numéro de capture est attribué **automatiquement**.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━"
