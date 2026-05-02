@@ -4908,7 +4908,7 @@ async def reglement_command(interaction: discord.Interaction):
         container.add_item(gallery)
 
         container.add_item(discord.ui.TextDisplay(
-            "## 📜 RÈGLEMENT DU SERVEUR - FSC 📜"
+            "## 📜 RÈGLEMENT FACTION - MSSCLICK 📜"
         ))
         container.add_item(discord.ui.TextDisplay(
             "> Merci de prendre le temps de lire et respecter le règlement du serveur. "
