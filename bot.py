@@ -5384,10 +5384,31 @@ captures_group = app_commands.Group(
 )
 
 
+async def admincap_member_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    if not interaction.guild:
+        return []
+    members = interaction.guild.members
+    current_lower = current.lower()
+    results = []
+    for m in members:
+        if current_lower in m.display_name.lower() or current_lower in m.name.lower():
+            label = f"{m.display_name} ({m.name})"[:100]
+            results.append(app_commands.Choice(name=label, value=str(m.id)))
+        if len(results) >= 25:
+            break
+    return results
+
+
 @captures_group.command(name="voir", description="Voir toutes les captures d'un membre.")
-@app_commands.describe(membre="Le membre dont voir les captures")
-async def captures_voir(interaction: discord.Interaction, membre: discord.Member):
+@app_commands.describe(membre="Tapez le nom du membre")
+@app_commands.autocomplete(membre=admincap_member_autocomplete)
+async def captures_voir(interaction: discord.Interaction, membre: str):
     await interaction.response.defer(ephemeral=True)
+
+    member_obj = interaction.guild.get_member(int(membre)) if membre.isdigit() else None
+    membre_display = member_obj.display_name if member_obj else f"ID {membre}"
 
     if not pool:
         await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
@@ -5395,18 +5416,19 @@ async def captures_voir(interaction: discord.Interaction, membre: discord.Member
 
     rows = await pool.fetch(
         "SELECT * FROM recensement WHERE guild_id = $1 AND victime LIKE $2 ORDER BY submitted_at ASC",
-        str(interaction.guild.id), f"%{membre.id}%"
+        str(interaction.guild.id), f"%{membre}%"
     )
 
     if not rows:
         await interaction.followup.send(
-            f"Aucune capture trouvée pour {membre.mention}.", ephemeral=True
+            f"Aucune capture trouvée pour **{membre_display}**.", ephemeral=True
         )
         return
 
+    mention_str = f"<@{membre}>" if membre.isdigit() else membre_display
     embed = discord.Embed(
-        title=f"📋 Captures de {membre.display_name}",
-        description=f"{membre.mention} — **{len(rows)}** capture(s) au total",
+        title=f"📋 Captures de {membre_display}",
+        description=f"{mention_str} — **{len(rows)}** capture(s) au total",
         color=0x2b2d31,
         timestamp=datetime.datetime.utcnow(),
     )
@@ -5593,9 +5615,14 @@ class CaptureAddModal(discord.ui.Modal, title="Ajouter une capture manuellement"
 
 
 @captures_group.command(name="ajouter", description="Ajouter une capture manuellement pour un membre.")
-@app_commands.describe(membre="La victime de la capture")
-async def captures_ajouter(interaction: discord.Interaction, membre: discord.Member):
-    await interaction.response.send_modal(CaptureAddModal(victim=membre))
+@app_commands.describe(membre="Tapez le nom du membre")
+@app_commands.autocomplete(membre=admincap_member_autocomplete)
+async def captures_ajouter(interaction: discord.Interaction, membre: str):
+    member_obj = interaction.guild.get_member(int(membre)) if membre.isdigit() else None
+    if not member_obj:
+        await interaction.response.send_message("❌ Membre introuvable. Veuillez sélectionner un membre dans la liste.", ephemeral=True)
+        return
+    await interaction.response.send_modal(CaptureAddModal(victim=member_obj))
 
 
 bot.tree.add_command(captures_group)
