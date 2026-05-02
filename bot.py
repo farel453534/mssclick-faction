@@ -4839,22 +4839,22 @@ async def info_command(interaction: discord.Interaction, user: discord.Member):
 async def gerants_command(interaction: discord.Interaction):
     try:
         description = (
-            "## Gérants de toutes les factions\n"
-            "<@1413486076332605481> & <@404799720305983497>\n\n"
+            "# Gérants de toutes les factions\n"
+            "> <@1413486076332605481> & <@404799720305983497>\n\n"
             "## AURORS\n"
-            "<@1413486076332605481> et <@565773187116302346>\n\n"
+            "> <@1413486076332605481> et <@565773187116302346>\n\n"
             "## MANGEMORT\n"
-            "<@1413486076332605481> et <@484798244996644864> & <@1045815146511081542>\n\n"
+            "> <@1413486076332605481> et <@484798244996644864> & <@1045815146511081542>\n\n"
             "## VAMPIRE\n"
-            "<@879458572986105887>\n\n"
+            "> <@879458572986105887>\n\n"
             "## MINISTERE\n"
-            "<@665228481654947853>\n\n"
+            "> <@665228481654947853>\n\n"
             "## MAGE-INDEPENDANT\n"
-            "<@665228481654947853>\n\n"
+            "> <@665228481654947853>\n\n"
             "## ORDRE DU PHENIX\n"
-            "<@380059243451121664>\n\n"
+            "> <@380059243451121664>\n\n"
             "## PROFESSEUR\n"
-            "<@415225558612443136> et <@685885648762044449>"
+            "> <@415225558612443136> et <@685885648762044449>"
         )
         embed = discord.Embed(
             title="Gérants Whitelist Factions",
