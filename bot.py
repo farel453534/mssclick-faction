@@ -399,6 +399,8 @@ intents.moderation = True
 
 class NexusCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.type != discord.InteractionType.application_command:
+            return True
         if interaction.guild is None:
             return True
         try:
@@ -410,11 +412,19 @@ class NexusCommandTree(app_commands.CommandTree):
                 and getattr(cmd.parent, "name", None) == "admincap"
             )
             if is_admincap:
-                allowed = await is_whitelisted(interaction.guild, interaction.user.id)
+                check_coro = is_whitelisted(interaction.guild, interaction.user.id)
                 error_msg = "❌ Seuls les membres de la ownerlist et whitelist peuvent utiliser cette commande."
             else:
-                allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
+                check_coro = is_owner_or_ownerlist(interaction.guild, interaction.user.id)
                 error_msg = "❌ Seuls les membres de la ownerlist peuvent utiliser les commandes du bot."
+            allowed = await asyncio.wait_for(check_coro, timeout=2.5)
+        except asyncio.TimeoutError:
+            logger.error("interaction_check: DB timeout")
+            try:
+                await interaction.response.send_message("❌ Délai dépassé lors de la vérification des droits.", ephemeral=True)
+            except Exception:
+                pass
+            return False
         except Exception as e:
             logger.error(f"interaction_check error: {e}\n{traceback.format_exc()}")
             try:
