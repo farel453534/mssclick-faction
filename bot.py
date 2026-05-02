@@ -4860,7 +4860,7 @@ async def gerants_command(interaction: discord.Interaction):
             description=description,
             color=0x2b2d31
         )
-        embed.set_image(url="https://i.imgur.com/JwXXtAv.png")
+        embed.set_image(url="https://i.imgur.com/nKuTsvY.png")
         await interaction.response.send_message(embed=embed)
     except Exception as e:
         logger.error(f"Error in /gerants: {traceback.format_exc()}")
