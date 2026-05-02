@@ -4855,8 +4855,8 @@ async def gerants_command(interaction: discord.Interaction):
             "> <@380059243451121664>\n\n"
             "## PROFESSEUR\n"
             "> <@685885648762044449> et <@118006132500463624>\n"
-            "\n___\n"
-            "Les gérants WL restent à votre disposition pour toute demande, question ou besoin d'accompagnement. N'hésitez pas à les contacter, ils sont là pour vous aider et veiller au bon déroulement de votre expérience de jeu."
+            "\n──────────────────────────────────────\n"
+            "Les\u00a0gérants\u00a0WL\u00a0restent\u00a0à\u00a0votre\u00a0disposition\u00a0pour\u00a0toute\u00a0demande,\u00a0question\u00a0ou\u00a0besoin\u00a0d'accompagnement.\u00a0N'hésitez\u00a0pas\u00a0à\u00a0les\u00a0contacter,\u00a0ils\u00a0sont\u00a0là\u00a0pour\u00a0vous\u00a0aider\u00a0et\u00a0veiller\u00a0au\u00a0bon\u00a0déroulement\u00a0de\u00a0votre\u00a0expérience\u00a0de\u00a0jeu."
         )
         embed = discord.Embed(
             description=description,
