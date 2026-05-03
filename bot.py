@@ -370,8 +370,8 @@ def build_help_embed(command_ids=None):
         else:
             text_lines.append(f"`{cmd['name']}` - {cmd['description']}")
 
-    description = "# MssClick - Faction\n"
-    description += "MssClick-Faction est un bot entièrement dédié à la protection du discord MssClick - Faction. Il est là pour garantir la protection du serveur Discord avec les meilleures protections.\n\n"
+    description = "# MssClick - Club\n"
+    description += "MssClick-Club est un bot entièrement dédié à la protection du discord MssClick - Club. Il est là pour garantir la protection du serveur Discord avec les meilleures protections.\n\n"
     description += "## Commandes Slash\n"
     description += "\n".join(slash_lines) + "\n\n"
     description += "## Commandes Textuelles\n"
@@ -5528,15 +5528,16 @@ class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
         required=False,
     )
 
-    def __init__(self, victim: discord.Member):
+    def __init__(self, victim: discord.Member, est_recrue: bool = False):
         super().__init__()
         self._victim = victim
+        self._est_recrue = est_recrue
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
 
-        if not pool:
+        if not pool and not self._est_recrue:
             await interaction.followup.send("❌ Base de données non connectée.", ephemeral=True)
             return
 
@@ -5551,6 +5552,33 @@ class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
         victim_id = str(self._victim.id)
         victime_display = self._victim.mention
         echanger = self.echanger_contre.value or "—"
+
+        if self._est_recrue:
+            embed = discord.Embed(
+                title="📋 Recensement de capture — RECRUE",
+                description="⚠️ **La victime est une recrue de sa faction.**\nCette capture **n'est pas comptabilisée** par le bot.",
+                color=0xE67E22,
+                timestamp=datetime.datetime.utcnow(),
+            )
+            embed.add_field(name="__• Date :__", value=self.date_event.value or "—", inline=False)
+            embed.add_field(name="__• Lieu :__", value=self.lieu.value or "—", inline=False)
+            embed.add_field(name="__• Victime :__", value=victime_display, inline=False)
+            embed.add_field(name="__• Agresseur :__", value=self.agresseur.value or "—", inline=False)
+            embed.add_field(name="__• L'action (résumé) :__", value=self.action_resume.value or "—", inline=False)
+            embed.add_field(name="__• Echanger contre :__", value=echanger, inline=False)
+            embed.set_footer(text=f"Soumis par {interaction.user} • {interaction.user.id} · 🚫 Non comptabilisée (recrue)")
+
+            try:
+                await channel.send(embed=embed)
+                await interaction.followup.send(
+                    "✅ Recensement envoyé. La victime étant une recrue, **la capture n'est pas comptabilisée**.",
+                    ephemeral=True,
+                )
+                await log_to_db('info', f'Recensement RECRUE (non comptabilisé) envoyé par {interaction.user} dans {guild.name}')
+            except Exception as e:
+                logger.error(f"Erreur envoi recensement recrue : {e}\n{traceback.format_exc()}")
+                await interaction.followup.send("❌ Une erreur est survenue lors de l'envoi.", ephemeral=True)
+            return
 
         try:
             count = await pool.fetchval(
@@ -5575,30 +5603,36 @@ class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
         embed.add_field(name="__• Capture numéro :__", value=str(capture_num), inline=False)
         embed.set_footer(text=f"Soumis par {interaction.user} • {interaction.user.id} · ⏳ En attente de validation")
 
+        msg = None
         try:
             msg = await channel.send(embed=embed, view=CaptureValidationView())
-            try:
-                await pool.execute(
-                    """INSERT INTO recensement_pending
-                       (guild_id, message_id, channel_id, user_id, user_name,
-                        date_event, lieu, victime, agresseur, action_resume,
-                        echanger_contre, capture_numero)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
-                    str(guild.id), str(msg.id), str(channel.id),
-                    str(interaction.user.id), str(interaction.user),
-                    self.date_event.value, self.lieu.value, victime_display,
-                    self.agresseur.value, self.action_resume.value,
-                    self.echanger_contre.value, str(capture_num),
-                )
-            except Exception as db_err:
-                logger.error(f"Erreur sauvegarde recensement_pending en DB : {db_err}")
+            await pool.execute(
+                """INSERT INTO recensement_pending
+                   (guild_id, message_id, channel_id, user_id, user_name,
+                    date_event, lieu, victime, agresseur, action_resume,
+                    echanger_contre, capture_numero)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                str(guild.id), str(msg.id), str(channel.id),
+                str(interaction.user.id), str(interaction.user),
+                self.date_event.value, self.lieu.value, victime_display,
+                self.agresseur.value, self.action_resume.value,
+                self.echanger_contre.value, str(capture_num),
+            )
             await interaction.followup.send(
                 f"✅ Recensement soumis ! Il sera enregistré une fois validé.", ephemeral=True
             )
             await log_to_db('info', f'Recensement pending #{capture_num} créé par {interaction.user} dans {guild.name}')
         except Exception as e:
             logger.error(f"Erreur envoi recensement : {e}\n{traceback.format_exc()}")
-            await interaction.followup.send("❌ Une erreur est survenue lors de l'envoi.", ephemeral=True)
+            if msg is not None:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            await interaction.followup.send(
+                "❌ Une erreur est survenue lors de l'enregistrement. Recensement annulé, merci de réessayer.",
+                ephemeral=True,
+            )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         logger.error(f"Erreur RecensementModal : {error}\n{traceback.format_exc()}")
@@ -5609,6 +5643,24 @@ class RecensementModal(discord.ui.Modal, title="Recensement de capture"):
                 await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
         except Exception:
             pass
+
+
+class RecrueChoiceView(discord.ui.View):
+    def __init__(self, victim: discord.Member):
+        super().__init__(timeout=120)
+        self._victim = victim
+
+    @discord.ui.button(label="Oui (recrue)", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def yes_recrue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RecensementModal(victim=self._victim, est_recrue=True))
+
+    @discord.ui.button(label="Non", style=discord.ButtonStyle.success, emoji="✅")
+    async def no_recrue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RecensementModal(victim=self._victim, est_recrue=False))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 
 class VictimSelectView(discord.ui.View):
@@ -5624,7 +5676,14 @@ class VictimSelectView(discord.ui.View):
     async def select_victim(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         try:
             victim = select.values[0]
-            await interaction.response.send_modal(RecensementModal(victim=victim))
+            view = RecrueChoiceView(victim=victim)
+            await interaction.response.send_message(
+                f"**La victime {victim.mention} est-elle une recrue de sa faction ?**\n"
+                "• **Oui** → l'embed sera envoyé mais **la capture ne sera pas comptabilisée**.\n"
+                "• **Non** → recensement normal (validation requise).",
+                view=view,
+                ephemeral=True,
+            )
         except Exception as e:
             logger.error(f"Erreur VictimSelectView : {e}\n{traceback.format_exc()}")
             try:
