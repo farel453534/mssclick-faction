@@ -370,8 +370,8 @@ def build_help_embed(command_ids=None):
         else:
             text_lines.append(f"`{cmd['name']}` - {cmd['description']}")
 
-    description = "# MssClick - Club\n"
-    description += "MssClick-Club est un bot entièrement dédié à la protection du discord MssClick - Club. Il est là pour garantir la protection du serveur Discord avec les meilleures protections.\n\n"
+    description = "# MssClick - Faction\n"
+    description += "MssClick-Faction est un bot entièrement dédié à la protection du discord MssClick - Faction. Il est là pour garantir la protection du serveur Discord avec les meilleures protections.\n\n"
     description += "## Commandes Slash\n"
     description += "\n".join(slash_lines) + "\n\n"
     description += "## Commandes Textuelles\n"
