@@ -4852,7 +4852,7 @@ async def gerants_command(interaction: discord.Interaction):
 
         container.add_item(discord.ui.TextDisplay(
             "## AURORS\n"
-            "> <@380059243451121664> et <@565773187116302346>"
+            "> <@1413486076332605481> et <@565773187116302346>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MANGEMORT\n"
@@ -5751,8 +5751,28 @@ async def cmd_recpanel(interaction: discord.Interaction):
 captures_group = app_commands.Group(
     name="admincap",
     description="Gérer les captures du serveur (ownerlist/whitelist).",
-    default_permissions=discord.Permissions(administrator=True),
 )
+
+
+async def _admincap_check(interaction: discord.Interaction) -> bool:
+    if not interaction.guild:
+        await interaction.response.send_message("❌ Commande utilisable uniquement sur un serveur.", ephemeral=True)
+        return False
+    user_id = interaction.user.id
+    if interaction.user.guild_permissions.administrator:
+        return True
+    if await is_owner_or_ownerlist(interaction.guild, user_id):
+        return True
+    if await is_whitelisted(interaction.guild, user_id):
+        return True
+    await interaction.response.send_message(
+        "❌ Seuls les administrateurs, l'ownerlist et la whitelist peuvent utiliser `/admincap`.",
+        ephemeral=True,
+    )
+    return False
+
+
+captures_group.interaction_check = _admincap_check
 
 
 async def admincap_member_autocomplete(
