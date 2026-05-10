@@ -6222,6 +6222,13 @@ class TicketCreateButton(
             ),
         }
 
+        viewer_role = guild.get_role(1062740125630603377)
+        if viewer_role:
+            overwrites[viewer_role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=False,
+                read_message_history=True, add_reactions=True,
+            )
+
         try:
             channel = await guild.create_text_channel(
                 name=chan_name,
@@ -6298,6 +6305,54 @@ async def ticketpanel_command(interaction: discord.Interaction, faction: app_com
     except Exception as e:
         logger.error(f"Erreur /ticketpanel : {e}\n{traceback.format_exc()}")
         await interaction.followup.send("❌ Impossible de poster le panneau.", ephemeral=True)
+
+
+@bot.tree.command(name="closeticket", description="Fermer (supprimer) le ticket en cours.")
+@app_commands.default_permissions(administrator=True)
+async def closeticket_command(interaction: discord.Interaction):
+    is_allowed = interaction.user.id == BOT_OWNER_ID
+    if not is_allowed and interaction.guild:
+        try:
+            is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
+        except Exception:
+            is_allowed = False
+    if not is_allowed:
+        await interaction.response.send_message("❌ Commande inconnue.", ephemeral=True)
+        return
+
+    channel = interaction.channel
+    if not channel or not interaction.guild:
+        await interaction.response.send_message("❌ Commande utilisable uniquement sur un serveur.", ephemeral=True)
+        return
+
+    is_ticket_channel = (
+        channel.category_id in {f["category_id"] for f in TICKET_FACTIONS.values()}
+        and channel.topic and "uid=" in channel.topic
+    )
+    if not is_ticket_channel:
+        await interaction.response.send_message(
+            "❌ Cette commande doit être utilisée dans un salon de ticket.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"🗑️ Ticket fermé par {interaction.user.mention}. Suppression du salon dans 5 secondes…"
+    )
+    await asyncio.sleep(5)
+    try:
+        await channel.delete(reason=f"Ticket fermé par {interaction.user}")
+        try:
+            await log_to_db('info', f'Ticket {channel.name} fermé par {interaction.user} dans {interaction.guild.name}')
+        except Exception:
+            pass
+    except discord.Forbidden:
+        try:
+            await interaction.followup.send("❌ Le bot n'a pas la permission de supprimer ce salon.", ephemeral=True)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Erreur suppression ticket : {e}\n{traceback.format_exc()}")
 
 
 async def main():
