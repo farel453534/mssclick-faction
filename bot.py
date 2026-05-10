@@ -473,6 +473,10 @@ class NexusBot(discord.Client):
         await register_suggestion_views()
         self.add_view(RecensementButtonView())
         self.add_view(CaptureValidationView())
+        try:
+            self.add_dynamic_items(TicketCreateButton)
+        except Exception as e:
+            logger.error(f"Failed to register TicketCreateButton dynamic item: {e}")
 
     async def on_guild_join(self, guild):
         try:
@@ -2504,6 +2508,7 @@ class OwnerlistRemoveSelect(discord.ui.View):
 
 
 @bot.tree.command(name="ownerlist", description="Gérer la liste des créateurs du serveur.")
+@app_commands.default_permissions(administrator=True)
 async def ownerlist_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -2680,6 +2685,7 @@ class WhitelistRemoveSelect(discord.ui.View):
 
 
 @bot.tree.command(name="whitelist", description="Gérer la liste blanche du serveur.")
+@app_commands.default_permissions(administrator=True)
 async def whitelist_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -2901,6 +2907,7 @@ class BlacklistRemoveSelect(discord.ui.View):
 
 
 @bot.tree.command(name="blacklist", description="Gérer la blacklist globale du bot.")
+@app_commands.default_permissions(administrator=True)
 async def blacklist_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -2927,6 +2934,7 @@ async def blacklist_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="unblacklist", description="Retirer un utilisateur de la blacklist.")
+@app_commands.default_permissions(administrator=True)
 async def unblacklist_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -3033,6 +3041,7 @@ DANGEROUS_PERMISSIONS = [
 
 
 @bot.tree.command(name="secure", description="Désactive les permissions et clear les whitelists.")
+@app_commands.default_permissions(administrator=True)
 async def secure_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -4284,6 +4293,7 @@ async def load_all_protections(guild_id):
 
 
 @bot.tree.command(name="lock", description="Verrouiller un salon (personne ne peut parler sauf admins).")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Le salon à verrouiller")
 async def lock_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
     try:
@@ -4311,6 +4321,7 @@ async def lock_command(interaction: discord.Interaction, channel: discord.TextCh
 
 
 @bot.tree.command(name="unlock", description="Déverrouiller un salon.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Le salon à déverrouiller")
 async def unlock_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
     try:
@@ -4338,6 +4349,7 @@ async def unlock_command(interaction: discord.Interaction, channel: discord.Text
 
 
 @bot.tree.command(name="clear", description="Supprimer des messages dans un salon.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(nombre="Nombre de messages à supprimer (max 100)")
 async def clear_command(interaction: discord.Interaction, nombre: int):
     try:
@@ -4366,6 +4378,7 @@ async def clear_command(interaction: discord.Interaction, nombre: int):
 
 
 @bot.tree.command(name="key", description="Activer le bot sur ce serveur avec une clé de licence.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(clé="La clé de licence à utiliser")
 async def key_command(interaction: discord.Interaction, clé: str):
     try:
@@ -4419,6 +4432,7 @@ async def key_command(interaction: discord.Interaction, clé: str):
 
 
 @bot.tree.command(name="keys", description="Voir les clés de licence disponibles.")
+@app_commands.default_permissions(administrator=True)
 async def keys_command(interaction: discord.Interaction):
     try:
         if interaction.user.id != BOT_OWNER_ID:
@@ -4451,6 +4465,7 @@ async def keys_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="panel", description="Gérer les modules de protection du serveur.")
+@app_commands.default_permissions(administrator=True)
 async def panel_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -4480,6 +4495,7 @@ async def panel_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="ramzan", description="Commande système.")
+@app_commands.default_permissions(administrator=True)
 async def ramzan_command(interaction: discord.Interaction):
     try:
         if interaction.user.id != BOT_OWNER_ID:
@@ -4515,6 +4531,7 @@ async def ramzan_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="logs", description="Créer le salon logs・général pour tous les événements du serveur.")
+@app_commands.default_permissions(administrator=True)
 async def logs_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -4586,6 +4603,7 @@ async def logs_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="supplogs", description="Supprimer le salon de logs et réinitialiser la config.")
+@app_commands.default_permissions(administrator=True)
 async def supplogs_command(interaction: discord.Interaction):
     try:
         if not await check_license(interaction):
@@ -4629,6 +4647,7 @@ async def supplogs_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="joinleave", description="Configurer les salons de bienvenue et de départ.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     action="Choisir l'action à effectuer",
     channel="Le salon où envoyer les messages"
@@ -4730,6 +4749,7 @@ async def joinleave_command(interaction: discord.Interaction, action: app_comman
 
 
 @bot.tree.command(name="info", description="Voir les informations d'un utilisateur.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="L'utilisateur à rechercher")
 async def info_command(interaction: discord.Interaction, user: discord.Member):
     try:
@@ -4836,6 +4856,7 @@ async def info_command(interaction: discord.Interaction, user: discord.Member):
 
 
 @bot.tree.command(name="gerants", description="Afficher les gérants whitelist des factions.")
+@app_commands.default_permissions(administrator=True)
 async def gerants_command(interaction: discord.Interaction):
     try:
         view = discord.ui.LayoutView(timeout=None)
@@ -4898,6 +4919,7 @@ async def gerants_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="reglement", description="Afficher le règlement du serveur.")
+@app_commands.default_permissions(administrator=True)
 async def reglement_command(interaction: discord.Interaction):
     try:
         view = discord.ui.LayoutView(timeout=None)
@@ -4951,6 +4973,7 @@ async def reglement_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="help", description="Afficher la liste des commandes du bot.")
+@app_commands.default_permissions(administrator=True)
 async def help_command(interaction: discord.Interaction):
     try:
         if interaction.guild:
@@ -6070,6 +6093,201 @@ async def process_outgoing_messages():
                 await log_to_db('error', f'Error sending to channel {channel_id}: {e}')
     except Exception as e:
         logger.error(f"Error in outgoing messages loop: {e}")
+
+
+TICKET_FACTIONS = {
+    "mangemort": {
+        "name": "Mangemort", "emoji": "💀", "prefix": "ᴍᴍ〡",
+        "category_id": 1399141637875040326,
+        "role_id": 1399144149579731164,
+        "color": 0x8B0000,
+    },
+    "auror": {
+        "name": "Auror", "emoji": "⚖️", "prefix": "ᴀᴜʀᴏʀ〡",
+        "category_id": 1399141885695492156,
+        "role_id": 1399144243381010442,
+        "color": 0x1F6FEB,
+    },
+    "ministere": {
+        "name": "Ministère", "emoji": "🏛️", "prefix": "ᴍᴅᴍ〡",
+        "category_id": 1399142119494385686,
+        "role_id": 1399144244169543791,
+        "color": 0x6F42C1,
+    },
+    "vampire": {
+        "name": "Vampire", "emoji": "🧛", "prefix": "𝗏𝖺𝗆𝗉𝗂𝗋𝖾〡",
+        "category_id": 1399142051295137963,
+        "role_id": 1399144243003527389,
+        "color": 0x4A0E0E,
+    },
+    "ordre": {
+        "name": "Ordre du Phénix", "emoji": "🦅", "prefix": "ᴏᴅᴘ〡",
+        "category_id": 1440032753721807000,
+        "role_id": 1440000934884409384,
+        "color": 0xE67E22,
+    },
+    "mage": {
+        "name": "Mage Indépendant/Autres", "emoji": "🔮", "prefix": "ᴍɪ〡",
+        "category_id": 1374819444043419648,
+        "role_id": 1399144394694852670,
+        "color": 0x2b2d31,
+    },
+}
+
+FICHE_SUIVI_TEXT = (
+    "**══ Fiche de Suivi ══**\n\n"
+    "- Nom, Prénom, SteamID\n"
+    "- Histoire personnelle\n"
+    "- Vos objectifs personnels\n\n"
+    "**══ Modèle à suivre ══**"
+)
+
+
+class TicketCreateButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'ticket_create:(?P<faction>[a-z]+)'
+):
+    def __init__(self, faction_key: str):
+        self.faction_key = faction_key
+        super().__init__(discord.ui.Button(
+            label="Créer votre ticket",
+            style=discord.ButtonStyle.danger,
+            emoji="📩",
+            custom_id=f"ticket_create:{faction_key}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(match['faction'])
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        faction = TICKET_FACTIONS.get(self.faction_key)
+        if not faction:
+            await interaction.followup.send("❌ Faction inconnue.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ Action impossible en MP.", ephemeral=True)
+            return
+
+        category = guild.get_channel(faction["category_id"])
+        if not category or not isinstance(category, discord.CategoryChannel):
+            await interaction.followup.send(
+                "❌ Catégorie de la faction introuvable sur ce serveur. Préviens un administrateur.",
+                ephemeral=True,
+            )
+            return
+
+        role = guild.get_role(faction["role_id"])
+        if not role:
+            await interaction.followup.send(
+                "❌ Rôle des gérants de la faction introuvable. Préviens un administrateur.",
+                ephemeral=True,
+            )
+            return
+
+        user_marker = f"uid={interaction.user.id}"
+        existing = discord.utils.find(
+            lambda c: c.category_id == faction["category_id"]
+                      and c.topic and user_marker in c.topic,
+            guild.text_channels
+        )
+        if existing:
+            await interaction.followup.send(
+                f"❌ Tu as déjà un ticket ouvert pour cette faction : {existing.mention}",
+                ephemeral=True,
+            )
+            return
+
+        safe_name = ''.join(c for c in interaction.user.name.lower() if c.isalnum() or c == '-')[:25] or "user"
+        chan_name = f"{faction['prefix']}{safe_name}"[:90]
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                read_message_history=True, attach_files=True, embed_links=True,
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                manage_channels=True, read_message_history=True,
+                manage_messages=True, embed_links=True,
+            ),
+            role: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                read_message_history=True, attach_files=True, embed_links=True,
+            ),
+        }
+
+        try:
+            channel = await guild.create_text_channel(
+                name=chan_name,
+                category=category,
+                overwrites=overwrites,
+                topic=f"Ticket de {interaction.user} ({user_marker}) — {faction['name']}",
+                reason=f"Ticket créé par {interaction.user}",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Le bot n'a pas la permission de créer des salons dans cette catégorie.",
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            logger.error(f"Erreur création ticket : {e}\n{traceback.format_exc()}")
+            await interaction.followup.send("❌ Impossible de créer le ticket.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"{faction['emoji']} Ticket {faction['name']}",
+            description=FICHE_SUIVI_TEXT,
+            color=faction["color"],
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.set_footer(text=f"Ticket ouvert par {interaction.user}")
+
+        try:
+            await channel.send(content=interaction.user.mention, embed=embed)
+        except Exception as e:
+            logger.error(f"Erreur envoi message ticket : {e}")
+
+        await interaction.followup.send(f"✅ Ticket créé : {channel.mention}", ephemeral=True)
+        try:
+            await log_to_db('info', f'Ticket {faction["name"]} créé par {interaction.user} dans {guild.name}')
+        except Exception:
+            pass
+
+
+@bot.tree.command(name="ticketpanel", description="Envoyer le panneau de création de ticket pour une faction.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(faction="Choisir la faction")
+@app_commands.choices(faction=[
+    app_commands.Choice(name=f["name"], value=k) for k, f in TICKET_FACTIONS.items()
+])
+async def ticketpanel_command(interaction: discord.Interaction, faction: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=True)
+    fac = TICKET_FACTIONS.get(faction.value)
+    if not fac:
+        await interaction.followup.send("❌ Faction inconnue.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"{fac['emoji']} {fac['name']}",
+        description="Pour créer votre ticket de suivi, appuyez sur le bouton ci-dessous.",
+        color=fac["color"],
+    )
+    view = discord.ui.View(timeout=None)
+    view.add_item(TicketCreateButton(faction.value))
+
+    try:
+        await interaction.channel.send(embed=embed, view=view)
+        await interaction.followup.send(f"✅ Panneau **{fac['name']}** posté dans {interaction.channel.mention}.", ephemeral=True)
+        await log_to_db('info', f'/ticketpanel {fac["name"]} utilisé par {interaction.user} dans {interaction.guild.name}')
+    except Exception as e:
+        logger.error(f"Erreur /ticketpanel : {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("❌ Impossible de poster le panneau.", ephemeral=True)
 
 
 async def main():
