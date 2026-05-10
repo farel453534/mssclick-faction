@@ -6201,7 +6201,8 @@ class TicketCreateButton(
             )
             return
 
-        safe_name = ''.join(c for c in interaction.user.name.lower() if c.isalnum() or c == '-')[:25] or "user"
+        display = getattr(interaction.user, "display_name", None) or interaction.user.name
+        safe_name = ''.join(c for c in display.lower() if c.isalnum() or c == '-')[:25] or "user"
         chan_name = f"{faction['prefix']}{safe_name}"[:90]
 
         overwrites = {
