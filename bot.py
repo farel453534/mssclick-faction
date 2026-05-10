@@ -6267,6 +6267,15 @@ class TicketCreateButton(
     app_commands.Choice(name=f["name"], value=k) for k, f in TICKET_FACTIONS.items()
 ])
 async def ticketpanel_command(interaction: discord.Interaction, faction: app_commands.Choice[str]):
+    is_allowed = interaction.user.id == BOT_OWNER_ID
+    if not is_allowed and interaction.guild:
+        try:
+            is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
+        except Exception:
+            is_allowed = False
+    if not is_allowed:
+        await interaction.response.send_message("❌ Commande inconnue.", ephemeral=True)
+        return
     await interaction.response.defer(ephemeral=True)
     fac = TICKET_FACTIONS.get(faction.value)
     if not fac:
