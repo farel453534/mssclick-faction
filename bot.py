@@ -479,7 +479,7 @@ class NexusBot(discord.Client):
             logger.error(f"Failed to register TicketCreateButton dynamic item: {e}")
         try:
             self.add_view(CombatPanelView())
-            self.add_dynamic_items(CombatAcceptButton, CombatModifyButton, CombatReacceptButton)
+            self.add_dynamic_items(CombatAcceptButton, CombatModifyButton, CombatReacceptButton, CombatRefuseButton)
         except Exception as e:
             logger.error(f"Failed to register combat views: {e}")
 
@@ -6323,22 +6323,23 @@ COMBAT_FACTIONS = {
 }
 
 COMBAT_EVENT_TYPES = ["Combat", "Attaque de territoire", "Capture de Drapeau"]
-COMBAT_LIEUX = ["Forêt Interdite", "Forêt", "Pré-au-Lard", "Poudlard", "Autre (préciser)"]
+COMBAT_LIEUX = ["Forêt", "Forêt Interdite"]
 COMBAT_CONSEQUENCES = ["Blessures graves", "CK", "Perte d'un territoire", "Vol d'objet", "Autres ?"]
 
-CF_FACTION = "⚔️ Faction affrontée"
-CF_TYPE = "🎯 Type d'événement"
-CF_LIEU = "📍 Lieu RP"
-CF_DATE = "📅 Date & Heure"
-CF_OBJ = "📝 Objectif RP"
-CF_CONS = "⚠️ Conséquences RP possibles"
-CF_RULES = "📜 Restrictions / Règles"
-CF_ORG = "🧑‍⚖️ Organisateur"
-CF_STATUS = "📌 Statut"
+CF_FACTION = "Faction affrontée"
+CF_TYPE = "Type d'événement"
+CF_LIEU = "Lieu RP"
+CF_DATE = "Date & Heure"
+CF_OBJ = "Objectif RP"
+CF_CONS = "Conséquences RP possibles"
+CF_RULES = "Restrictions / Règles"
+CF_ORG = "Organisateur"
+CF_STATUS = "Statut"
 
-COMBAT_COLOR_PENDING = 0x5865F2
+COMBAT_COLOR_PENDING = 0xC0392B
 COMBAT_COLOR_MODIFIED = 0xE67E22
 COMBAT_COLOR_ACCEPTED = 0x2ECC71
+COMBAT_COLOR_REFUSED = 0x4F545C
 
 
 def _combat_field(embed: discord.Embed, name: str, default: str = "—") -> str:
@@ -6369,13 +6370,18 @@ def _has_role(member, role_id: int) -> bool:
 def build_combat_embed(*, faction_key, faction_name, type_str, lieu_str,
                        date_str, objectif_str, cons_str, rules_str,
                        organizer_id, status_str, color):
+    fac = COMBAT_FACTIONS.get(faction_key, {})
+    fac_display = f"{fac.get('emoji', '')} {faction_name}".strip()
     embed = discord.Embed(
-        title="⚔️ Planification de Combat",
+        title=f"⚔️ DÉFI DE COMBAT — {faction_name}".upper(),
+        description=(
+            f"## Les gérants {fac_display} sont défiés !\n"
+            "Consultez la proposition ci-dessous puis **Acceptez** ou **Modifiez**."
+        ),
         color=color,
         timestamp=datetime.datetime.utcnow(),
     )
-    fac = COMBAT_FACTIONS.get(faction_key, {})
-    embed.add_field(name=CF_FACTION, value=f"{fac.get('emoji', '')} {faction_name}".strip(), inline=True)
+    embed.add_field(name=CF_FACTION, value=fac_display, inline=True)
     embed.add_field(name=CF_TYPE, value=type_str or "—", inline=True)
     embed.add_field(name=CF_LIEU, value=lieu_str or "—", inline=True)
     embed.add_field(name=CF_DATE, value=date_str or "—", inline=False)
@@ -6409,12 +6415,22 @@ class CombatDetailsModal(discord.ui.Modal, title="Détails du combat"):
         required=False,
     )
 
-    def __init__(self, *, faction_key, type_str, lieu_str, cons_str):
+    def __init__(self, *, faction_key, type_str, lieu_str, cons_str,
+                 edit_message=None, org_id=None,
+                 prefill_date="", prefill_obj="", prefill_rules=""):
         super().__init__()
         self._faction_key = faction_key
         self._type_str = type_str
         self._lieu_str = lieu_str
         self._cons_str = cons_str
+        self._edit_message = edit_message
+        self._org_id = org_id
+        if prefill_date:
+            self.date_heure.default = prefill_date
+        if prefill_obj:
+            self.objectif.default = prefill_obj
+        if prefill_rules:
+            self.restrictions.default = prefill_rules
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -6422,6 +6438,36 @@ class CombatDetailsModal(discord.ui.Modal, title="Détails du combat"):
         fac = COMBAT_FACTIONS.get(self._faction_key)
         if not guild or not fac:
             await interaction.followup.send("❌ Erreur : faction inconnue.", ephemeral=True)
+            return
+
+        if self._edit_message is not None:
+            embed = build_combat_embed(
+                faction_key=self._faction_key,
+                faction_name=fac["name"],
+                type_str=self._type_str,
+                lieu_str=self._lieu_str,
+                date_str=self.date_heure.value,
+                objectif_str=self.objectif.value or "—",
+                cons_str=self._cons_str,
+                rules_str=self.restrictions.value or "—",
+                organizer_id=self._org_id,
+                status_str=f"Modifié par {interaction.user.mention} — en attente de validation de l'organisateur",
+                color=COMBAT_COLOR_MODIFIED,
+            )
+            view = make_combat_reaccept_view(self._org_id, self._faction_key)
+            try:
+                await self._edit_message.edit(
+                    content=f"<@{self._org_id}>",
+                    embed=embed,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions(users=True),
+                )
+                await interaction.followup.send(
+                    "✅ Modifications envoyées à l'organisateur pour validation.", ephemeral=True)
+                await log_to_db('info', f'Combat modifié par {interaction.user} dans {guild.name}')
+            except Exception as e:
+                logger.error(f"Erreur modif combat : {e}\n{traceback.format_exc()}")
+                await interaction.followup.send("❌ Impossible d'enregistrer la modification.", ephemeral=True)
             return
 
         role = guild.get_role(fac["role_id"])
@@ -6442,7 +6488,7 @@ class CombatDetailsModal(discord.ui.Modal, title="Détails du combat"):
             cons_str=self._cons_str,
             rules_str=self.restrictions.value or "—",
             organizer_id=interaction.user.id,
-            status_str="⏳ En attente d'acceptation par les gérants adverses",
+            status_str="En attente d'acceptation par les gérants adverses",
             color=COMBAT_COLOR_PENDING,
         )
 
@@ -6464,55 +6510,6 @@ class CombatDetailsModal(discord.ui.Modal, title="Détails du combat"):
         except Exception as e:
             logger.error(f"Erreur envoi combat : {e}\n{traceback.format_exc()}")
             await interaction.followup.send("❌ Impossible d'envoyer la proposition.", ephemeral=True)
-
-
-class CombatModifyModal(discord.ui.Modal, title="Modifier le combat"):
-    date_heure = discord.ui.TextInput(label="Date & Heure", max_length=100, required=True)
-    objectif = discord.ui.TextInput(
-        label="Objectif RP", style=discord.TextStyle.paragraph, max_length=500, required=False)
-    restrictions = discord.ui.TextInput(
-        label="Restrictions / Règles", style=discord.TextStyle.paragraph, max_length=500, required=False)
-
-    def __init__(self, *, org_id, faction_key, source_embed, source_message):
-        super().__init__()
-        self._org_id = org_id
-        self._faction_key = faction_key
-        self._src = source_embed
-        self._message = source_message
-        self.date_heure.default = _combat_field(source_embed, CF_DATE, "")
-        obj = _combat_field(source_embed, CF_OBJ, "")
-        self.objectif.default = "" if obj == "—" else obj
-        rules = _combat_field(source_embed, CF_RULES, "")
-        self.restrictions.default = "" if rules == "—" else rules
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        fac = COMBAT_FACTIONS.get(self._faction_key, {})
-        embed = build_combat_embed(
-            faction_key=self._faction_key,
-            faction_name=_combat_field(self._src, CF_FACTION, fac.get("name", "—")).replace(fac.get("emoji", ""), "").strip(),
-            type_str=_combat_field(self._src, CF_TYPE),
-            lieu_str=_combat_field(self._src, CF_LIEU),
-            date_str=self.date_heure.value,
-            objectif_str=self.objectif.value or "—",
-            cons_str=_combat_field(self._src, CF_CONS),
-            rules_str=self.restrictions.value or "—",
-            organizer_id=self._org_id,
-            status_str=f"⚠️ Modifié par {interaction.user.mention} — en attente de validation de l'organisateur",
-            color=COMBAT_COLOR_MODIFIED,
-        )
-        view = make_combat_reaccept_view(self._org_id, self._faction_key)
-        try:
-            await self._message.edit(
-                content=f"<@{self._org_id}>",
-                embed=embed,
-                view=view,
-                allowed_mentions=discord.AllowedMentions(users=True),
-            )
-            await interaction.followup.send("✅ Modifications envoyées à l'organisateur pour validation.", ephemeral=True)
-        except Exception as e:
-            logger.error(f"Erreur modif combat : {e}\n{traceback.format_exc()}")
-            await interaction.followup.send("❌ Impossible d'enregistrer la modification.", ephemeral=True)
 
 
 class CombatAcceptButton(
@@ -6550,12 +6547,62 @@ class CombatAcceptButton(
         embed = interaction.message.embeds[0]
         for i, f in enumerate(embed.fields):
             if f.name == CF_STATUS:
-                embed.set_field_at(i, name=CF_STATUS, value=f"✅ Combat accepté par {member.mention}", inline=True)
+                embed.set_field_at(i, name=CF_STATUS, value=f"Combat accepté par {member.mention}", inline=True)
                 break
         embed.color = discord.Color(COMBAT_COLOR_ACCEPTED)
         await interaction.message.edit(embed=embed, view=None)
         try:
             await log_to_db('info', f'Combat ({fac.get("name")}) accepté par {member} dans {interaction.guild.name}')
+        except Exception:
+            pass
+
+
+class CombatRefuseButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'combat_refuse:(?P<org>\d+):(?P<faction>[a-z]+)'
+):
+    def __init__(self, org_id: int, faction_key: str):
+        self.org_id = org_id
+        self.faction_key = faction_key
+        super().__init__(discord.ui.Button(
+            label="Refuser le combat",
+            style=discord.ButtonStyle.danger,
+            emoji="✖️",
+            custom_id=f"combat_refuse:{org_id}:{faction_key}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['org']), match['faction'])
+
+    async def callback(self, interaction: discord.Interaction):
+        fac = COMBAT_FACTIONS.get(self.faction_key, {})
+        role_id = fac.get("role_id")
+        member = await _resolve_member(interaction)
+        if not _has_role(member, role_id):
+            await interaction.response.send_message(
+                "❌ Seuls les gérants de la faction concernée peuvent refuser ce combat.",
+                ephemeral=True,
+            )
+            return
+        if not interaction.message or not interaction.message.embeds:
+            await interaction.response.send_message("❌ Embed du combat introuvable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        embed = interaction.message.embeds[0]
+        for i, f in enumerate(embed.fields):
+            if f.name == CF_STATUS:
+                embed.set_field_at(i, name=CF_STATUS, value=f"Combat refusé par {member.mention}", inline=True)
+                break
+        embed.color = discord.Color(COMBAT_COLOR_REFUSED)
+        await interaction.message.edit(
+            content=f"<@{self.org_id}>",
+            embed=embed,
+            view=None,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+        try:
+            await log_to_db('info', f'Combat ({fac.get("name")}) refusé par {member} dans {interaction.guild.name}')
         except Exception:
             pass
 
@@ -6591,12 +6638,35 @@ class CombatModifyButton(
         if not interaction.message or not interaction.message.embeds:
             await interaction.response.send_message("❌ Embed du combat introuvable.", ephemeral=True)
             return
-        await interaction.response.send_modal(CombatModifyModal(
+        src = interaction.message.embeds[0]
+        type_v = _combat_field(src, CF_TYPE)
+        lieu_v = _combat_field(src, CF_LIEU)
+        cons_v = _combat_field(src, CF_CONS)
+        cons_list = (
+            [c.strip() for c in cons_v.split(",")]
+            if cons_v not in ("—", "Aucune", "") else []
+        )
+        date_v = _combat_field(src, CF_DATE, "")
+        obj_v = _combat_field(src, CF_OBJ, "")
+        rules_v = _combat_field(src, CF_RULES, "")
+        view = CombatSetupView(
+            faction_value=self.faction_key,
+            type_value=type_v if type_v in COMBAT_EVENT_TYPES else None,
+            lieu_value=lieu_v if lieu_v in COMBAT_LIEUX else None,
+            cons_values=[c for c in cons_list if c in COMBAT_CONSEQUENCES],
+            edit_message=interaction.message,
             org_id=self.org_id,
-            faction_key=self.faction_key,
-            source_embed=interaction.message.embeds[0],
-            source_message=interaction.message,
-        ))
+            prefill_date="" if date_v == "—" else date_v,
+            prefill_obj="" if obj_v == "—" else obj_v,
+            prefill_rules="" if rules_v == "—" else rules_v,
+        )
+        await interaction.response.send_message(
+            "**Re-modifie le combat depuis le début** : ajuste la faction, le type, le lieu et les "
+            "conséquences, puis clique sur **Détails & Envoyer** pour revoir la date, l'objectif et "
+            "les règles.",
+            view=view,
+            ephemeral=True,
+        )
 
 
 class CombatReacceptButton(
@@ -6631,7 +6701,7 @@ class CombatReacceptButton(
         embed = interaction.message.embeds[0]
         for i, f in enumerate(embed.fields):
             if f.name == CF_STATUS:
-                embed.set_field_at(i, name=CF_STATUS, value=f"✅ Modifications validées par {interaction.user.mention}", inline=True)
+                embed.set_field_at(i, name=CF_STATUS, value=f"Modifications validées par {interaction.user.mention}", inline=True)
                 break
         embed.color = discord.Color(COMBAT_COLOR_ACCEPTED)
         await interaction.message.edit(content=None, embed=embed, view=None)
@@ -6645,6 +6715,7 @@ def make_combat_response_view(org_id: int, faction_key: str) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     view.add_item(CombatAcceptButton(org_id, faction_key))
     view.add_item(CombatModifyButton(org_id, faction_key))
+    view.add_item(CombatRefuseButton(org_id, faction_key))
     return view
 
 
@@ -6655,12 +6726,31 @@ def make_combat_reaccept_view(org_id: int, faction_key: str) -> discord.ui.View:
 
 
 class CombatSetupView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, *, faction_value=None, type_value=None, lieu_value=None,
+                 cons_values=None, edit_message=None, org_id=None,
+                 prefill_date="", prefill_obj="", prefill_rules=""):
         super().__init__(timeout=600)
-        self.faction_value = None
-        self.type_value = None
-        self.lieu_value = None
-        self.cons_values = []
+        self.faction_value = faction_value
+        self.type_value = type_value
+        self.lieu_value = lieu_value
+        self.cons_values = cons_values or []
+        self.edit_message = edit_message
+        self.org_id = org_id
+        self._prefill_date = prefill_date
+        self._prefill_obj = prefill_obj
+        self._prefill_rules = prefill_rules
+        if faction_value:
+            for o in self.faction_select.options:
+                o.default = (o.value == faction_value)
+        if type_value:
+            for o in self.type_select.options:
+                o.default = (o.value == type_value)
+        if lieu_value:
+            for o in self.lieu_select.options:
+                o.default = (o.value == lieu_value)
+        if self.cons_values:
+            for o in self.cons_select.options:
+                o.default = (o.value in self.cons_values)
 
     @discord.ui.select(
         placeholder="Faction à affronter…",
@@ -6715,6 +6805,11 @@ class CombatSetupView(discord.ui.View):
             type_str=self.type_value,
             lieu_str=self.lieu_value,
             cons_str=cons_str,
+            edit_message=self.edit_message,
+            org_id=self.org_id,
+            prefill_date=self._prefill_date,
+            prefill_obj=self._prefill_obj,
+            prefill_rules=self._prefill_rules,
         ))
 
 
