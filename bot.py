@@ -479,7 +479,7 @@ class NexusBot(discord.Client):
             logger.error(f"Failed to register TicketCreateButton dynamic item: {e}")
         try:
             self.add_view(CombatPanelView())
-            self.add_dynamic_items(CombatAcceptButton, CombatModifyButton, CombatReacceptButton, CombatRefuseButton)
+            self.add_dynamic_items(CombatAcceptButton, CombatModifyButton, CombatReacceptButton, CombatRefuseButton, CombatRefuseModifyButton)
         except Exception as e:
             logger.error(f"Failed to register combat views: {e}")
 
@@ -6373,7 +6373,7 @@ def build_combat_embed(*, faction_key, faction_name, type_str, lieu_str,
     fac = COMBAT_FACTIONS.get(faction_key, {})
     fac_display = f"{fac.get('emoji', '')} {faction_name}".strip()
     embed = discord.Embed(
-        title=f"⚔️ DÉFI DE COMBAT — {faction_name}".upper(),
+        title=f"⚔️ Proposition Combat - {faction_name}",
         description=(
             f"## Les gérants {fac_display} sont défiés !\n"
             "Consultez la proposition ci-dessous puis **Acceptez** ou **Modifiez**."
@@ -6549,6 +6549,8 @@ class CombatAcceptButton(
             if f.name == CF_STATUS:
                 embed.set_field_at(i, name=CF_STATUS, value=f"Combat accepté par {member.mention}", inline=True)
                 break
+        fac_display = f"{fac.get('emoji', '')} {fac.get('name', '')}".strip()
+        embed.description = f"## La Faction {fac_display} relève le défi !"
         embed.color = discord.Color(COMBAT_COLOR_ACCEPTED)
         await interaction.message.edit(embed=embed, view=None)
         try:
@@ -6711,6 +6713,52 @@ class CombatReacceptButton(
             pass
 
 
+class CombatRefuseModifyButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'combat_refusemod:(?P<org>\d+):(?P<faction>[a-z]+)'
+):
+    def __init__(self, org_id: int, faction_key: str):
+        self.org_id = org_id
+        self.faction_key = faction_key
+        super().__init__(discord.ui.Button(
+            label="Refuser les modifications",
+            style=discord.ButtonStyle.danger,
+            emoji="✖️",
+            custom_id=f"combat_refusemod:{org_id}:{faction_key}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['org']), match['faction'])
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.org_id:
+            await interaction.response.send_message(
+                "❌ Seul l'organisateur du combat peut refuser les modifications.",
+                ephemeral=True,
+            )
+            return
+        if not interaction.message or not interaction.message.embeds:
+            await interaction.response.send_message("❌ Embed du combat introuvable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        embed = interaction.message.embeds[0]
+        for i, f in enumerate(embed.fields):
+            if f.name == CF_STATUS:
+                embed.set_field_at(
+                    i, name=CF_STATUS,
+                    value=f"Modifications refusées par {interaction.user.mention} — combat annulé",
+                    inline=True,
+                )
+                break
+        embed.color = discord.Color(COMBAT_COLOR_REFUSED)
+        await interaction.message.edit(content=None, embed=embed, view=None)
+        try:
+            await log_to_db('info', f'Modifs combat refusées (combat annulé) par {interaction.user} dans {interaction.guild.name}')
+        except Exception:
+            pass
+
+
 def make_combat_response_view(org_id: int, faction_key: str) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     view.add_item(CombatAcceptButton(org_id, faction_key))
@@ -6722,6 +6770,7 @@ def make_combat_response_view(org_id: int, faction_key: str) -> discord.ui.View:
 def make_combat_reaccept_view(org_id: int, faction_key: str) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     view.add_item(CombatReacceptButton(org_id, faction_key))
+    view.add_item(CombatRefuseModifyButton(org_id, faction_key))
     return view
 
 
@@ -6742,6 +6791,9 @@ class CombatSetupView(discord.ui.View):
         if faction_value:
             for o in self.faction_select.options:
                 o.default = (o.value == faction_value)
+        if edit_message is not None:
+            self.faction_select.disabled = True
+            self.faction_select.placeholder = "Faction (non modifiable)"
         if type_value:
             for o in self.type_select.options:
                 o.default = (o.value == type_value)
