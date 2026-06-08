@@ -6316,6 +6316,13 @@ async def ticketpanel_command(interaction: discord.Interaction, faction: app_com
 
 COMBAT_PLANNER_ROLE_ID = 1062740125605449877
 
+# Rôles autorisés à accepter / modifier / refuser une proposition de combat
+COMBAT_MANAGER_ROLE_IDS = [
+    1062740125605449876,  # Gérants
+    1399144149579731164,
+    1399144243381010442,
+]
+
 COMBAT_FACTIONS = {
     "mangemort": {"name": "Mangemort", "emoji": "💀", "role_id": 1399144149579731164, "color": 0x8B0000},
     "auror": {"name": "Auror", "emoji": "⚖️", "role_id": 1399144243381010442, "color": 0x1F6FEB},
@@ -6365,6 +6372,13 @@ async def _resolve_member(interaction: discord.Interaction):
 
 def _has_role(member, role_id: int) -> bool:
     return bool(member) and any(r.id == role_id for r in getattr(member, "roles", []))
+
+
+def _has_any_role(member, role_ids) -> bool:
+    if not member:
+        return False
+    member_role_ids = {r.id for r in getattr(member, "roles", [])}
+    return any(rid in member_role_ids for rid in role_ids)
 
 
 def build_combat_embed(*, faction_key, faction_name, type_str, lieu_str,
@@ -6532,11 +6546,10 @@ class CombatAcceptButton(
 
     async def callback(self, interaction: discord.Interaction):
         fac = COMBAT_FACTIONS.get(self.faction_key, {})
-        role_id = fac.get("role_id")
         member = await _resolve_member(interaction)
-        if not _has_role(member, role_id):
+        if not _has_any_role(member, COMBAT_MANAGER_ROLE_IDS):
             await interaction.response.send_message(
-                "❌ Seuls les gérants de la faction concernée peuvent accepter ce combat.",
+                "❌ Tu n'as pas le rôle requis pour accepter ce combat.",
                 ephemeral=True,
             )
             return
@@ -6579,11 +6592,10 @@ class CombatRefuseButton(
 
     async def callback(self, interaction: discord.Interaction):
         fac = COMBAT_FACTIONS.get(self.faction_key, {})
-        role_id = fac.get("role_id")
         member = await _resolve_member(interaction)
-        if not _has_role(member, role_id):
+        if not _has_any_role(member, COMBAT_MANAGER_ROLE_IDS):
             await interaction.response.send_message(
-                "❌ Seuls les gérants de la faction concernée peuvent refuser ce combat.",
+                "❌ Tu n'as pas le rôle requis pour refuser ce combat.",
                 ephemeral=True,
             )
             return
@@ -6629,11 +6641,10 @@ class CombatModifyButton(
 
     async def callback(self, interaction: discord.Interaction):
         fac = COMBAT_FACTIONS.get(self.faction_key, {})
-        role_id = fac.get("role_id")
         member = await _resolve_member(interaction)
-        if not _has_role(member, role_id):
+        if not _has_any_role(member, COMBAT_MANAGER_ROLE_IDS):
             await interaction.response.send_message(
-                "❌ Seuls les gérants de la faction concernée peuvent modifier ce combat.",
+                "❌ Tu n'as pas le rôle requis pour modifier ce combat.",
                 ephemeral=True,
             )
             return
