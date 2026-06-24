@@ -6952,6 +6952,12 @@ CONTRAT_CREATOR_ROLE_IDS = [
     1062740125605449874,  # Mangemort
 ]
 
+# Salon où sont publiés les contrats
+CONTRAT_PUBLISH_CHANNEL_ID = 1519461397598048367
+
+# Catégorie où sont créés les salons privés commanditaire/mercenaire
+CONTRAT_CATEGORY_ID = 1519459783042924555
+
 CONTRAT_TYPES = {
     "merc": {"label": "Mercenariat", "emoji": "🗡️"},
     "spe": {"label": "Contrat spécial", "emoji": "⭐"},
@@ -7029,12 +7035,18 @@ class ContratModal(discord.ui.Modal):
             color=CONTRAT_COLOR_OPEN,
         )
         view = make_contrat_open_view(interaction.user.id)
+        channel = interaction.guild.get_channel(CONTRAT_PUBLISH_CHANNEL_ID)
+        if channel is None:
+            await interaction.followup.send(
+                "❌ Salon de publication des contrats introuvable. Contacte un administrateur.",
+                ephemeral=True)
+            return
         try:
-            await interaction.channel.send(embed=embed, view=view)
-            await interaction.followup.send("✅ Contrat publié dans le livre.", ephemeral=True)
+            await channel.send(embed=embed, view=view)
+            await interaction.followup.send(f"✅ Contrat publié dans {channel.mention}.", ephemeral=True)
             await log_to_db('info', f'Contrat ({self._type_key}) publié par {interaction.user} dans {interaction.guild.name}')
         except discord.Forbidden:
-            await interaction.followup.send("❌ Le bot ne peut pas écrire dans ce salon.", ephemeral=True)
+            await interaction.followup.send("❌ Le bot ne peut pas écrire dans le salon des contrats.", ephemeral=True)
         except Exception as e:
             logger.error(f"Erreur publication contrat : {e}\n{traceback.format_exc()}")
             await interaction.followup.send("❌ Impossible de publier le contrat.", ephemeral=True)
@@ -7045,6 +7057,53 @@ def _contrat_set_status(embed: discord.Embed, value: str):
         if f.name == CTF_STATUT:
             embed.set_field_at(i, name=CTF_STATUT, value=value, inline=True)
             return
+
+
+def _contrat_field(embed: discord.Embed, name: str):
+    for f in embed.fields:
+        if f.name == name:
+            return f.value
+    return None
+
+
+async def _contrat_fetch_member(guild, user_id: int):
+    member = guild.get_member(user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(user_id)
+        except Exception:
+            member = None
+    return member
+
+
+async def _contrat_send_dm(user, embed: discord.Embed):
+    if user is None:
+        return False
+    try:
+        await user.send(embed=embed)
+        return True
+    except Exception:
+        return False
+
+
+async def _contrat_open_private_channel(guild, creator, acceptor, category, *, titre):
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, manage_channels=True, read_message_history=True),
+    }
+    member_perms = discord.PermissionOverwrite(
+        view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
+    if acceptor:
+        overwrites[acceptor] = member_perms
+    if creator and (acceptor is None or creator.id != acceptor.id):
+        overwrites[creator] = member_perms
+    base = acceptor.display_name if acceptor else "contrat"
+    name = f"contrat-{base}"[:90]
+    channel = await guild.create_text_channel(
+        name=name, category=category, overwrites=overwrites,
+        reason="Salon privé de contrat")
+    return channel
 
 
 class ContratAcceptButton(
@@ -7074,10 +7133,68 @@ class ContratAcceptButton(
             await interaction.response.send_message("❌ Contrat introuvable.", ephemeral=True)
             return
         await interaction.response.defer()
+        guild = interaction.guild
         embed = interaction.message.embeds[0]
+        titre = _contrat_field(embed, CTF_TITRE) or "Contrat"
+        creator = await _contrat_fetch_member(guild, self.author_id)
+
+        category = guild.get_channel(CONTRAT_CATEGORY_ID)
+        if not isinstance(category, discord.CategoryChannel):
+            await interaction.followup.send(
+                "❌ La catégorie des salons de contrat est introuvable. "
+                "Le contrat n'a pas été pris, préviens un administrateur.",
+                ephemeral=True)
+            return
+
+        try:
+            private_channel = await _contrat_open_private_channel(
+                guild, creator, member, category, titre=titre)
+        except discord.Forbidden:
+            logger.error("Contrat: permission manquante pour créer le salon privé.")
+            await interaction.followup.send(
+                "❌ Je n'ai pas la permission de créer le salon privé (Gérer les salons). "
+                "Le contrat n'a pas été pris.",
+                ephemeral=True)
+            return
+        except Exception as e:
+            logger.error(f"Contrat: échec création salon privé : {e}\n{traceback.format_exc()}")
+            await interaction.followup.send(
+                "❌ Erreur lors de la création du salon privé. Le contrat n'a pas été pris.",
+                ephemeral=True)
+            return
+
         _contrat_set_status(embed, f"🟠 Pris en charge par {member.mention}")
         embed.color = discord.Color(CONTRAT_COLOR_PROGRESS)
-        await interaction.message.edit(embed=embed, view=make_contrat_progress_view(self.author_id))
+        embed.add_field(name="💬 Salon privé", value=private_channel.mention, inline=True)
+        await interaction.message.edit(
+            embed=embed, view=make_contrat_progress_view(self.author_id, member.id))
+
+        intro = discord.Embed(
+            title="💬 Discussion de contrat",
+            description=(
+                f"Salon privé entre {creator.mention if creator else '`commanditaire`'} "
+                f"(commanditaire) et {member.mention} (mercenaire).\n\n"
+                f"**Contrat :** {titre}\n"
+                "Vous pouvez discuter librement ici des détails du contrat."
+            ),
+            color=CONTRAT_COLOR_PROGRESS,
+        )
+        mentions = member.mention + (f" {creator.mention}" if creator else "")
+        try:
+            await private_channel.send(content=mentions, embed=intro)
+        except Exception:
+            pass
+
+        dm_embed = discord.Embed(
+            title="📕 Ton contrat a été pris !",
+            description=(
+                f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
+                f"Un salon privé a été ouvert : {private_channel.mention}"
+            ),
+            color=CONTRAT_COLOR_PROGRESS,
+        )
+        await _contrat_send_dm(creator, dm_embed)
+
         try:
             await log_to_db('info', f'Contrat pris par {member} dans {interaction.guild.name}')
         except Exception:
@@ -7086,20 +7203,21 @@ class ContratAcceptButton(
 
 class ContratDoneButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r'contrat_done:(?P<author>\d+)'
+    template=r'contrat_done:(?P<author>\d+):(?P<accepter>\d+)'
 ):
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, accepter_id: int):
         self.author_id = author_id
+        self.accepter_id = accepter_id
         super().__init__(discord.ui.Button(
             label="Marquer terminé",
             style=discord.ButtonStyle.primary,
             emoji="🏁",
-            custom_id=f"contrat_done:{author_id}",
+            custom_id=f"contrat_done:{author_id}:{accepter_id}",
         ))
 
     @classmethod
     async def from_custom_id(cls, interaction, item, match, /):
-        return cls(int(match['author']))
+        return cls(int(match['author']), int(match['accepter']))
 
     async def callback(self, interaction: discord.Interaction):
         member = await _resolve_member(interaction)
@@ -7114,7 +7232,23 @@ class ContratDoneButton(
         embed = interaction.message.embeds[0]
         _contrat_set_status(embed, f"✅ Terminé — validé par {member.mention}")
         embed.color = discord.Color(CONTRAT_COLOR_DONE)
+        titre = _contrat_field(embed, CTF_TITRE) or "Contrat"
         await interaction.message.edit(embed=embed, view=None)
+
+        guild = interaction.guild
+        creator = await _contrat_fetch_member(guild, self.author_id)
+        acceptor = await _contrat_fetch_member(guild, self.accepter_id)
+        dm_embed = discord.Embed(
+            title="🏁 Contrat terminé",
+            description=(
+                f"Le contrat **{titre}** a été marqué comme **terminé** par {member.mention}."
+            ),
+            color=CONTRAT_COLOR_DONE,
+        )
+        await _contrat_send_dm(creator, dm_embed)
+        if acceptor and (creator is None or acceptor.id != creator.id):
+            await _contrat_send_dm(acceptor, dm_embed)
+
         try:
             await log_to_db('info', f'Contrat terminé par {member} dans {interaction.guild.name}')
         except Exception:
@@ -7123,20 +7257,25 @@ class ContratDoneButton(
 
 class ContratCancelButton(
     discord.ui.DynamicItem[discord.ui.Button],
-    template=r'contrat_cancel:(?P<author>\d+)'
+    template=r'contrat_cancel:(?P<author>\d+)(?::(?P<accepter>\d+))?'
 ):
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, accepter_id: int = None):
         self.author_id = author_id
+        self.accepter_id = accepter_id
+        custom_id = f"contrat_cancel:{author_id}"
+        if accepter_id is not None:
+            custom_id += f":{accepter_id}"
         super().__init__(discord.ui.Button(
             label="Annuler",
             style=discord.ButtonStyle.danger,
             emoji="✖️",
-            custom_id=f"contrat_cancel:{author_id}",
+            custom_id=custom_id,
         ))
 
     @classmethod
     async def from_custom_id(cls, interaction, item, match, /):
-        return cls(int(match['author']))
+        accepter = match['accepter']
+        return cls(int(match['author']), int(accepter) if accepter else None)
 
     async def callback(self, interaction: discord.Interaction):
         member = await _resolve_member(interaction)
@@ -7165,10 +7304,10 @@ def make_contrat_open_view(author_id: int) -> discord.ui.View:
     return view
 
 
-def make_contrat_progress_view(author_id: int) -> discord.ui.View:
+def make_contrat_progress_view(author_id: int, accepter_id: int) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    view.add_item(ContratDoneButton(author_id))
-    view.add_item(ContratCancelButton(author_id))
+    view.add_item(ContratDoneButton(author_id, accepter_id))
+    view.add_item(ContratCancelButton(author_id, accepter_id))
     return view
 
 
