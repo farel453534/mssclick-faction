@@ -484,6 +484,7 @@ class NexusBot(discord.Client):
             logger.error(f"Failed to register combat views: {e}")
         try:
             self.add_view(ContratPanelView())
+            self.add_view(ContratCloseView())
             self.add_dynamic_items(ContratAcceptButton, ContratDoneButton, ContratCancelButton)
         except Exception as e:
             logger.error(f"Failed to register contrat views: {e}")
@@ -7181,7 +7182,7 @@ class ContratAcceptButton(
         )
         mentions = member.mention + (f" {creator.mention}" if creator else "")
         try:
-            await private_channel.send(content=mentions, embed=intro)
+            await private_channel.send(content=mentions, embed=intro, view=ContratCloseView())
         except Exception:
             pass
 
@@ -7326,6 +7327,39 @@ def make_contrat_progress_view(author_id: int, accepter_id: int) -> discord.ui.V
     view.add_item(ContratDoneButton(author_id, accepter_id))
     view.add_item(ContratCancelButton(author_id, accepter_id))
     return view
+
+
+class ContratCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Fermer le salon", style=discord.ButtonStyle.danger,
+                       emoji="🔒", custom_id="contrat_close_channel")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = await _resolve_member(interaction)
+        allowed = (
+            _has_role(member, CONTRAT_ACCEPT_ROLE_ID)
+            or _has_any_role(member, CONTRAT_CREATOR_ROLE_IDS)
+            or (member is not None and member.guild_permissions.manage_channels)
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le droit de fermer ce salon.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"🔒 Salon fermé par {interaction.user.mention}. Suppression dans 5 secondes…")
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(
+                reason=f"Salon de contrat fermé par {interaction.user}")
+        except Exception as e:
+            logger.error(f"Contrat: échec suppression salon privé : {e}\n{traceback.format_exc()}")
+            try:
+                await interaction.followup.send(
+                    "❌ Impossible de supprimer le salon (permission manquante ?).",
+                    ephemeral=True)
+            except Exception:
+                pass
 
 
 class ContratPanelView(discord.ui.View):
