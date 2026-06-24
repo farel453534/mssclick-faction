@@ -482,6 +482,11 @@ class NexusBot(discord.Client):
             self.add_dynamic_items(CombatAcceptButton, CombatModifyButton, CombatReacceptButton, CombatRefuseButton, CombatRefuseModifyButton)
         except Exception as e:
             logger.error(f"Failed to register combat views: {e}")
+        try:
+            self.add_view(ContratPanelView())
+            self.add_dynamic_items(ContratAcceptButton, ContratDoneButton, ContratCancelButton)
+        except Exception as e:
+            logger.error(f"Failed to register contrat views: {e}")
 
     async def on_guild_join(self, guild):
         try:
@@ -6933,6 +6938,294 @@ async def combatpanel_command(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Erreur /combatpanel : {e}\n{traceback.format_exc()}")
         await interaction.followup.send("❌ Impossible de poster le panneau.", ephemeral=True)
+
+
+# ════════════════════ LIVRE DE CONTRATS / BINGO BOOK ════════════════════
+
+# Rôle autorisé à accepter / réaliser un contrat
+CONTRAT_ACCEPT_ROLE_ID = 1062740125475426411
+
+# Rôles autorisés à créer (et annuler) un contrat
+CONTRAT_CREATOR_ROLE_IDS = [
+    1062740125559300163,  # Ministère
+    1062740125517348875,  # Auror
+    1062740125605449874,  # Mangemort
+]
+
+CONTRAT_TYPES = {
+    "merc": {"label": "Mercenariat", "emoji": "🗡️"},
+    "spe": {"label": "Contrat spécial", "emoji": "⭐"},
+}
+
+CTF_TYPE = "Type"
+CTF_TITRE = "Titre / Cible"
+CTF_RECOMP = "Récompense"
+CTF_OBJ = "Objectif / Description"
+CTF_COND = "Conditions / Restrictions"
+CTF_DELAI = "Délai"
+CTF_COMMAND = "Commanditaire"
+CTF_STATUT = "Statut"
+
+CONTRAT_COLOR_OPEN = 0xC0392B
+CONTRAT_COLOR_PROGRESS = 0xE67E22
+CONTRAT_COLOR_DONE = 0x2ECC71
+CONTRAT_COLOR_CANCEL = 0x4F545C
+
+
+def build_contrat_embed(*, type_key, titre, recompense, objectif, conditions,
+                        delai, commanditaire_id, statut, color):
+    t = CONTRAT_TYPES.get(type_key, {})
+    embed = discord.Embed(
+        title=f"{t.get('emoji', '📕')} {t.get('label', 'Contrat')}",
+        description=f"## {titre}",
+        color=color,
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.add_field(name=CTF_TYPE, value=t.get("label", "—"), inline=True)
+    embed.add_field(name=CTF_RECOMP, value=recompense or "—", inline=True)
+    embed.add_field(name=CTF_DELAI, value=delai or "—", inline=True)
+    embed.add_field(name=CTF_OBJ, value=objectif or "—", inline=False)
+    embed.add_field(name=CTF_COND, value=conditions or "—", inline=False)
+    embed.add_field(name=CTF_TITRE, value=titre or "—", inline=False)
+    embed.add_field(name=CTF_COMMAND, value=f"<@{commanditaire_id}>", inline=True)
+    embed.add_field(name=CTF_STATUT, value=statut, inline=True)
+    return embed
+
+
+class ContratModal(discord.ui.Modal):
+    titre = discord.ui.TextInput(
+        label="Titre / Cible", placeholder="Ex : Éliminer X, Récupérer Y…", max_length=100, required=True)
+    recompense = discord.ui.TextInput(
+        label="Récompense", placeholder="Ex : 5000 gallions, une faveur…", max_length=200, required=True)
+    objectif = discord.ui.TextInput(
+        label="Objectif / Description", style=discord.TextStyle.paragraph, max_length=1000, required=True)
+    conditions = discord.ui.TextInput(
+        label="Conditions / Restrictions", style=discord.TextStyle.paragraph, max_length=500, required=False)
+    delai = discord.ui.TextInput(
+        label="Délai", placeholder="Ex : sous 7 jours RP (optionnel)", max_length=100, required=False)
+
+    def __init__(self, *, type_key):
+        self._type_key = type_key
+        t = CONTRAT_TYPES.get(type_key, {})
+        super().__init__(title=f"Nouveau — {t.get('label', 'Contrat')}")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = await _resolve_member(interaction)
+        if not _has_any_role(member, CONTRAT_CREATOR_ROLE_IDS):
+            await interaction.followup.send(
+                "❌ Seuls le Ministère, les Aurors et les Mangemorts peuvent créer un contrat.",
+                ephemeral=True)
+            return
+        embed = build_contrat_embed(
+            type_key=self._type_key,
+            titre=self.titre.value,
+            recompense=self.recompense.value,
+            objectif=self.objectif.value,
+            conditions=self.conditions.value or "—",
+            delai=self.delai.value or "—",
+            commanditaire_id=interaction.user.id,
+            statut="🟢 Ouvert",
+            color=CONTRAT_COLOR_OPEN,
+        )
+        view = make_contrat_open_view(interaction.user.id)
+        try:
+            await interaction.channel.send(embed=embed, view=view)
+            await interaction.followup.send("✅ Contrat publié dans le livre.", ephemeral=True)
+            await log_to_db('info', f'Contrat ({self._type_key}) publié par {interaction.user} dans {interaction.guild.name}')
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Le bot ne peut pas écrire dans ce salon.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Erreur publication contrat : {e}\n{traceback.format_exc()}")
+            await interaction.followup.send("❌ Impossible de publier le contrat.", ephemeral=True)
+
+
+def _contrat_set_status(embed: discord.Embed, value: str):
+    for i, f in enumerate(embed.fields):
+        if f.name == CTF_STATUT:
+            embed.set_field_at(i, name=CTF_STATUT, value=value, inline=True)
+            return
+
+
+class ContratAcceptButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_accept:(?P<author>\d+)'
+):
+    def __init__(self, author_id: int):
+        self.author_id = author_id
+        super().__init__(discord.ui.Button(
+            label="Prendre le contrat",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            custom_id=f"contrat_accept:{author_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['author']))
+
+    async def callback(self, interaction: discord.Interaction):
+        member = await _resolve_member(interaction)
+        if not _has_role(member, CONTRAT_ACCEPT_ROLE_ID):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le rôle requis pour prendre un contrat.", ephemeral=True)
+            return
+        if not interaction.message or not interaction.message.embeds:
+            await interaction.response.send_message("❌ Contrat introuvable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        embed = interaction.message.embeds[0]
+        _contrat_set_status(embed, f"🟠 Pris en charge par {member.mention}")
+        embed.color = discord.Color(CONTRAT_COLOR_PROGRESS)
+        await interaction.message.edit(embed=embed, view=make_contrat_progress_view(self.author_id))
+        try:
+            await log_to_db('info', f'Contrat pris par {member} dans {interaction.guild.name}')
+        except Exception:
+            pass
+
+
+class ContratDoneButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_done:(?P<author>\d+)'
+):
+    def __init__(self, author_id: int):
+        self.author_id = author_id
+        super().__init__(discord.ui.Button(
+            label="Marquer terminé",
+            style=discord.ButtonStyle.primary,
+            emoji="🏁",
+            custom_id=f"contrat_done:{author_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['author']))
+
+    async def callback(self, interaction: discord.Interaction):
+        member = await _resolve_member(interaction)
+        if not _has_role(member, CONTRAT_ACCEPT_ROLE_ID):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le rôle requis.", ephemeral=True)
+            return
+        if not interaction.message or not interaction.message.embeds:
+            await interaction.response.send_message("❌ Contrat introuvable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        embed = interaction.message.embeds[0]
+        _contrat_set_status(embed, f"✅ Terminé — validé par {member.mention}")
+        embed.color = discord.Color(CONTRAT_COLOR_DONE)
+        await interaction.message.edit(embed=embed, view=None)
+        try:
+            await log_to_db('info', f'Contrat terminé par {member} dans {interaction.guild.name}')
+        except Exception:
+            pass
+
+
+class ContratCancelButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_cancel:(?P<author>\d+)'
+):
+    def __init__(self, author_id: int):
+        self.author_id = author_id
+        super().__init__(discord.ui.Button(
+            label="Annuler",
+            style=discord.ButtonStyle.danger,
+            emoji="✖️",
+            custom_id=f"contrat_cancel:{author_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['author']))
+
+    async def callback(self, interaction: discord.Interaction):
+        member = await _resolve_member(interaction)
+        if not (_has_any_role(member, CONTRAT_CREATOR_ROLE_IDS) or _has_role(member, CONTRAT_ACCEPT_ROLE_ID)):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le rôle requis pour annuler ce contrat.", ephemeral=True)
+            return
+        if not interaction.message or not interaction.message.embeds:
+            await interaction.response.send_message("❌ Contrat introuvable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        embed = interaction.message.embeds[0]
+        _contrat_set_status(embed, f"🚫 Annulé par {member.mention}")
+        embed.color = discord.Color(CONTRAT_COLOR_CANCEL)
+        await interaction.message.edit(embed=embed, view=None)
+        try:
+            await log_to_db('info', f'Contrat annulé par {member} dans {interaction.guild.name}')
+        except Exception:
+            pass
+
+
+def make_contrat_open_view(author_id: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ContratAcceptButton(author_id))
+    view.add_item(ContratCancelButton(author_id))
+    return view
+
+
+def make_contrat_progress_view(author_id: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ContratDoneButton(author_id))
+    view.add_item(ContratCancelButton(author_id))
+    return view
+
+
+class ContratPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _open(self, interaction: discord.Interaction, type_key: str):
+        member = await _resolve_member(interaction)
+        if not _has_any_role(member, CONTRAT_CREATOR_ROLE_IDS):
+            await interaction.response.send_message(
+                "❌ Seuls le Ministère, les Aurors et les Mangemorts peuvent créer un contrat.",
+                ephemeral=True)
+            return
+        await interaction.response.send_modal(ContratModal(type_key=type_key))
+
+    @discord.ui.button(label="Mercenariat", style=discord.ButtonStyle.danger,
+                       emoji="🗡️", custom_id="contrat_new_merc")
+    async def new_merc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open(interaction, "merc")
+
+    @discord.ui.button(label="Contrat spécial", style=discord.ButtonStyle.secondary,
+                       emoji="⭐", custom_id="contrat_new_spe")
+    async def new_spe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open(interaction, "spe")
+
+
+@bot.tree.command(name="contratbook", description="Poster le livre de contrats (bingo book).")
+@app_commands.default_permissions(administrator=True)
+async def contratbook_command(interaction: discord.Interaction):
+    is_allowed = interaction.user.id == BOT_OWNER_ID
+    if not is_allowed and interaction.guild:
+        try:
+            is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
+        except Exception:
+            is_allowed = False
+    if not is_allowed:
+        await interaction.response.send_message("❌ Commande inconnue.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    embed = discord.Embed(
+        title="📕 Livre de Contrats",
+        description=(
+            "Bienvenue dans le **livre de contrats** de la faction.\n\n"
+            "🗡️ **Mercenariat** — propose une mission rémunérée (cible, récompense, délai).\n"
+            "⭐ **Contrat spécial** — pour les contrats hors du commun.\n\n"
+            "Choisis ci-dessous le type de contrat à publier."
+        ),
+        color=CONTRAT_COLOR_OPEN,
+    )
+    try:
+        await interaction.channel.send(embed=embed, view=ContratPanelView())
+        await interaction.followup.send(f"✅ Livre de contrats posté dans {interaction.channel.mention}.", ephemeral=True)
+        await log_to_db('info', f'/contratbook utilisé par {interaction.user} dans {interaction.guild.name}')
+    except Exception as e:
+        logger.error(f"Erreur /contratbook : {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("❌ Impossible de poster le livre de contrats.", ephemeral=True)
 
 
 @bot.tree.command(name="closeticket", description="Fermer (supprimer) le ticket en cours.")
