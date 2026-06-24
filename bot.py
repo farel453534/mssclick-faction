@@ -7098,8 +7098,8 @@ async def _contrat_open_private_channel(guild, creator, acceptor, category, *, t
         overwrites[acceptor] = member_perms
     if creator and (acceptor is None or creator.id != acceptor.id):
         overwrites[creator] = member_perms
-    base = acceptor.display_name if acceptor else "contrat"
-    name = f"contrat-{base}"[:90]
+    cible = (titre or "").strip()
+    name = (f"contrat-{cible}" if cible else "contrat")[:90]
     channel = await guild.create_text_channel(
         name=name, category=category, overwrites=overwrites,
         reason="Salon privé de contrat")
@@ -7193,7 +7193,21 @@ class ContratAcceptButton(
             ),
             color=CONTRAT_COLOR_PROGRESS,
         )
-        await _contrat_send_dm(creator, dm_embed)
+        dm_target = creator
+        if dm_target is None:
+            try:
+                dm_target = await bot.fetch_user(self.author_id)
+            except Exception:
+                dm_target = None
+        dm_ok = await _contrat_send_dm(dm_target, dm_embed)
+        if not dm_ok:
+            try:
+                await private_channel.send(
+                    f"⚠️ <@{self.author_id}> (commanditaire) n'a pas pu être prévenu en MP "
+                    "(messages privés fermés ?). Le contrat a bien été pris."
+                )
+            except Exception:
+                pass
 
         try:
             await log_to_db('info', f'Contrat pris par {member} dans {interaction.guild.name}')
@@ -7236,8 +7250,6 @@ class ContratDoneButton(
         await interaction.message.edit(embed=embed, view=None)
 
         guild = interaction.guild
-        creator = await _contrat_fetch_member(guild, self.author_id)
-        acceptor = await _contrat_fetch_member(guild, self.accepter_id)
         dm_embed = discord.Embed(
             title="🏁 Contrat terminé",
             description=(
@@ -7245,9 +7257,14 @@ class ContratDoneButton(
             ),
             color=CONTRAT_COLOR_DONE,
         )
-        await _contrat_send_dm(creator, dm_embed)
-        if acceptor and (creator is None or acceptor.id != creator.id):
-            await _contrat_send_dm(acceptor, dm_embed)
+        for uid in {self.author_id, self.accepter_id}:
+            target = await _contrat_fetch_member(guild, uid)
+            if target is None:
+                try:
+                    target = await bot.fetch_user(uid)
+                except Exception:
+                    target = None
+            await _contrat_send_dm(target, dm_embed)
 
         try:
             await log_to_db('info', f'Contrat terminé par {member} dans {interaction.guild.name}')
