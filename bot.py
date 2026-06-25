@@ -7432,7 +7432,7 @@ WANTED_ROLE_IDS = [
 # Salon où sont publiés les avis de recherche
 WANTED_CHANNEL_ID = 1519500581960421417
 
-WANTED_COLOR = 0xC0392B
+WANTED_COLOR = 0x5DADE2
 
 
 class WantedModal(discord.ui.Modal):
@@ -7465,11 +7465,11 @@ class WantedModal(discord.ui.Modal):
             color=WANTED_COLOR,
             timestamp=datetime.datetime.utcnow(),
         )
-        embed.add_field(name="🎖️ Rang", value=self.rang.value, inline=True)
-        embed.add_field(name="🏛️ Appartenance", value=self.appartenance.value, inline=True)
-        embed.add_field(name="✅ Condition de Réussite", value=self.condition.value, inline=False)
-        embed.add_field(name="📌 Autre", value=self.autre.value or "—", inline=False)
-        embed.add_field(name="💰 Prime", value=self.prime.value, inline=True)
+        embed.add_field(name="Rang", value=self.rang.value, inline=True)
+        embed.add_field(name="Appartenance", value=self.appartenance.value, inline=True)
+        embed.add_field(name="Condition de Réussite", value=self.condition.value, inline=True)
+        embed.add_field(name="Autre", value=self.autre.value or "—", inline=True)
+        embed.add_field(name="Prime", value=self.prime.value, inline=True)
         embed.set_footer(text=f"Recensé par {interaction.user.display_name}")
 
         file = None
