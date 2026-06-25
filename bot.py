@@ -7436,6 +7436,8 @@ WANTED_COLOR = 0x5DADE2
 
 
 class WantedModal(discord.ui.Modal):
+    nom = discord.ui.TextInput(
+        label="Nom", placeholder="Ex : Voldemort", max_length=100, required=True)
     rang = discord.ui.TextInput(
         label="Rang", placeholder="Ex : S, A, B…", max_length=100, required=True)
     appartenance = discord.ui.TextInput(
@@ -7465,6 +7467,7 @@ class WantedModal(discord.ui.Modal):
             color=WANTED_COLOR,
             timestamp=datetime.datetime.utcnow(),
         )
+        embed.add_field(name="Nom", value=self.nom.value, inline=True)
         embed.add_field(name="Rang", value=self.rang.value, inline=True)
         embed.add_field(name="Appartenance", value=self.appartenance.value, inline=True)
         embed.add_field(name="Condition de Réussite", value=self.condition.value, inline=True)
