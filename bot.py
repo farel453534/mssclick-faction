@@ -7435,25 +7435,82 @@ WANTED_CHANNEL_ID = 1519500581960421417
 WANTED_COLOR = 0xC0392B
 
 
+class WantedModal(discord.ui.Modal):
+    rang = discord.ui.TextInput(
+        label="Rang", placeholder="Ex : S, A, B…", max_length=100, required=True)
+    appartenance = discord.ui.TextInput(
+        label="Appartenance", placeholder="Ex : Mangemort, Indépendant…", max_length=100, required=True)
+    condition = discord.ui.TextInput(
+        label="Condition de Réussite", style=discord.TextStyle.paragraph, max_length=500, required=True)
+    autre = discord.ui.TextInput(
+        label="Autre", style=discord.TextStyle.paragraph, max_length=500, required=False)
+    prime = discord.ui.TextInput(
+        label="Prime", placeholder="Ex : 50 000 gallions…", max_length=200, required=True)
+
+    def __init__(self, *, photo: discord.Attachment = None, lien_image: str = None):
+        self._photo = photo
+        self._lien_image = lien_image
+        super().__init__(title="Avis de recherche")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        channel = interaction.guild.get_channel(WANTED_CHANNEL_ID)
+        if channel is None:
+            await interaction.followup.send(
+                "❌ Salon du Wanted Book introuvable. Préviens un administrateur.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🎯 AVIS DE RECHERCHE",
+            color=WANTED_COLOR,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        embed.add_field(name="🎖️ Rang", value=self.rang.value, inline=True)
+        embed.add_field(name="🏛️ Appartenance", value=self.appartenance.value, inline=True)
+        embed.add_field(name="✅ Condition de Réussite", value=self.condition.value, inline=False)
+        embed.add_field(name="📌 Autre", value=self.autre.value or "—", inline=False)
+        embed.add_field(name="💰 Prime", value=self.prime.value, inline=True)
+        embed.set_footer(text=f"Recensé par {interaction.user.display_name}")
+
+        file = None
+        if self._photo is not None:
+            ext = self._photo.filename.rsplit('.', 1)[-1].lower() if '.' in self._photo.filename else 'png'
+            safe_name = f"wanted_image.{ext}"
+            try:
+                file = await self._photo.to_file(filename=safe_name)
+                embed.set_image(url=f"attachment://{safe_name}")
+            except Exception as e:
+                logger.error(f"Wanted: échec récupération photo : {e}")
+                await interaction.followup.send(
+                    "❌ Impossible de récupérer la photo. Réessaie en relançant /wanted.", ephemeral=True)
+                return
+        elif self._lien_image:
+            embed.set_image(url=self._lien_image)
+
+        try:
+            if file is not None:
+                await channel.send(embed=embed, file=file)
+            else:
+                await channel.send(embed=embed)
+            await interaction.followup.send(
+                f"✅ Avis de recherche publié dans {channel.mention}.", ephemeral=True)
+            await log_to_db('info', f'Wanted recensé par {interaction.user} dans {interaction.guild.name}')
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Le bot ne peut pas écrire dans le salon du Wanted Book.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Erreur /wanted : {e}\n{traceback.format_exc()}")
+            await interaction.followup.send(
+                "❌ Impossible de publier l'avis de recherche.", ephemeral=True)
+
+
 @bot.tree.command(name="wanted", description="Recenser une personne recherchée dans le Wanted Book.")
 @app_commands.describe(
-    nom="Nom / identité de la personne recherchée",
-    rang="Rang",
-    appartenance="Appartenance",
-    condition="Condition de Réussite",
-    prime="Prime",
-    autre="Autre (optionnel)",
     photo="Photo à uploader (optionnel si un lien est fourni)",
     lien_image="Lien d'une image (optionnel si une photo est uploadée)",
 )
 async def wanted_command(
     interaction: discord.Interaction,
-    nom: str,
-    rang: str,
-    appartenance: str,
-    condition: str,
-    prime: str,
-    autre: str = None,
     photo: discord.Attachment = None,
     lien_image: str = None,
 ):
@@ -7465,55 +7522,14 @@ async def wanted_command(
         return
     if photo is None and not lien_image:
         await interaction.response.send_message(
-            "❌ Tu dois fournir une **photo** (upload) ou un **lien d'image**.", ephemeral=True)
+            "❌ Tu dois fournir une **photo** (upload) ou un **lien d'image** lors de l'appel de la commande.",
+            ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True)
-    channel = interaction.guild.get_channel(WANTED_CHANNEL_ID)
-    if channel is None:
-        await interaction.followup.send(
-            "❌ Salon du Wanted Book introuvable. Préviens un administrateur.", ephemeral=True)
+    if photo is not None and not (photo.content_type and photo.content_type.startswith("image/")):
+        await interaction.response.send_message(
+            "❌ Le fichier uploadé n'est pas une image valide.", ephemeral=True)
         return
-
-    embed = discord.Embed(
-        title=f"🎯 AVIS DE RECHERCHE — {nom}",
-        color=WANTED_COLOR,
-        timestamp=datetime.datetime.utcnow(),
-    )
-    embed.add_field(name="🎖️ Rang", value=rang, inline=True)
-    embed.add_field(name="🏛️ Appartenance", value=appartenance, inline=True)
-    embed.add_field(name="✅ Condition de Réussite", value=condition, inline=False)
-    embed.add_field(name="📌 Autre", value=autre or "—", inline=False)
-    embed.add_field(name="💰 Prime", value=prime, inline=True)
-    embed.set_footer(text=f"Recensé par {interaction.user.display_name}")
-
-    file = None
-    if photo is not None:
-        if not (photo.content_type and photo.content_type.startswith("image/")):
-            await interaction.followup.send(
-                "❌ Le fichier uploadé n'est pas une image valide.", ephemeral=True)
-            return
-        ext = photo.filename.rsplit('.', 1)[-1].lower() if '.' in photo.filename else 'png'
-        safe_name = f"wanted_image.{ext}"
-        file = await photo.to_file(filename=safe_name)
-        embed.set_image(url=f"attachment://{safe_name}")
-    elif lien_image:
-        embed.set_image(url=lien_image)
-
-    try:
-        if file is not None:
-            await channel.send(embed=embed, file=file)
-        else:
-            await channel.send(embed=embed)
-        await interaction.followup.send(
-            f"✅ Avis de recherche publié dans {channel.mention}.", ephemeral=True)
-        await log_to_db('info', f'Wanted ({nom}) recensé par {interaction.user} dans {interaction.guild.name}')
-    except discord.Forbidden:
-        await interaction.followup.send(
-            "❌ Le bot ne peut pas écrire dans le salon du Wanted Book.", ephemeral=True)
-    except Exception as e:
-        logger.error(f"Erreur /wanted : {e}\n{traceback.format_exc()}")
-        await interaction.followup.send(
-            "❌ Impossible de publier l'avis de recherche.", ephemeral=True)
+    await interaction.response.send_modal(WantedModal(photo=photo, lien_image=lien_image))
 
 
 @bot.tree.command(name="closeticket", description="Fermer (supprimer) le ticket en cours.")
