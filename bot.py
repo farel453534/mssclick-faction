@@ -258,6 +258,14 @@ async def init_db():
                     submitted_at TIMESTAMP DEFAULT NOW()
                 );
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS contrat_anon_relay (
+                    channel_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    commanditaire_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
             existing_keys = await conn.fetchval("SELECT COUNT(*) FROM license_keys")
             if existing_keys == 0:
                 import secrets as sec
@@ -294,7 +302,7 @@ async def check_license(interaction):
     licensed = await is_guild_licensed(interaction.guild.id)
     if not licensed:
         embed = discord.Embed(
-            description="⚠️ Ce serveur n'a pas de licence active.\nDemandez à un administrateur d'utiliser `/key` pour activer le bot.",
+            description="⚠️ Ce serveur n'a pas de licence active.\nContactez le propriétaire du bot pour activer le bot.",
             color=0x2b2d31
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -309,8 +317,6 @@ SLASH_COMMANDS = [
     {"name": "/supplogs", "params": "", "description": "Supprimer les salons de logs et réinitialiser la config."},
     {"name": "/blacklist", "params": "member | permission", "description": "Gérer la liste noire du serveur."},
     {"name": "/unblacklist", "params": "", "description": "Retirer un utilisateur de la blacklist."},
-    {"name": "/lock", "params": "[channel]", "description": "Verrouiller un salon (personne ne peut parler sauf admins)."},
-    {"name": "/unlock", "params": "[channel]", "description": "Déverrouiller un salon."},
     {"name": "/whitelist", "params": "", "description": "Gérer la liste blanche du serveur."},
     {"name": "/ownerlist", "params": "", "description": "Gérer la liste des créateurs du serveur."},
     {"name": "/suggestions", "params": "", "description": "Affiche le panneau de suggestions du serveur."},
@@ -321,12 +327,7 @@ SLASH_COMMANDS = [
     {"name": "/admincap ajouter", "params": "[membre]", "description": "Ajouter une capture manuellement (ownerlist/whitelist)."},
 ]
 
-TEXT_COMMANDS = [
-    {"name": ".blacklist", "params": "[user]", "description": "Gérer la liste noire du serveur."},
-    {"name": ".help", "params": "", "description": "Afficher la liste des commandes du bot."},
-    {"name": ".ownerlist", "params": "[user]", "description": "Gérer la liste des créateurs du serveur."},
-    {"name": ".whitelist", "params": "[user]", "description": "Gérer la liste blanche du serveur."},
-]
+TEXT_COMMANDS = []
 
 
 async def get_command_ids(guild):
@@ -373,9 +374,10 @@ def build_help_embed(command_ids=None):
     description = "# MssClick - Club\n"
     description += "MssClick-Club est un bot entièrement dédié à la protection du discord MssClick - Club. Il est là pour garantir la protection du serveur Discord avec les meilleures protections.\n\n"
     description += "## Commandes Slash\n"
-    description += "\n".join(slash_lines) + "\n\n"
-    description += "## Commandes Textuelles\n"
-    description += "\n".join(text_lines)
+    description += "\n".join(slash_lines)
+    if text_lines:
+        description += "\n\n## Commandes Textuelles\n"
+        description += "\n".join(text_lines)
 
     embed = discord.Embed(
         description=description,
@@ -405,8 +407,6 @@ class NexusCommandTree(app_commands.CommandTree):
             return True
         try:
             cmd = interaction.command
-            if getattr(cmd, "name", None) == "wanted":
-                return True
             is_admincap = (
                 cmd is not None
                 and hasattr(cmd, "parent")
@@ -490,6 +490,10 @@ class NexusBot(discord.Client):
             self.add_dynamic_items(ContratAcceptButton, ContratDoneButton, ContratCancelButton)
         except Exception as e:
             logger.error(f"Failed to register contrat views: {e}")
+        try:
+            self.add_view(WantedPanelView())
+        except Exception as e:
+            logger.error(f"Failed to register wanted views: {e}")
 
     async def on_guild_join(self, guild):
         try:
@@ -1660,6 +1664,97 @@ class NexusBot(discord.Client):
         if message.author.bot:
             return
 
+        # ── Relais anonyme des contrats ──
+        if message.guild is None:
+            relays = await contrat_relay_list_by_commanditaire(message.author.id)
+            if relays:
+                target_relay = None
+                if message.reference and message.reference.message_id:
+                    routes = getattr(self, '_contrat_dm_routes', {})
+                    ch_id = routes.get(message.reference.message_id)
+                    if ch_id is not None:
+                        for r in relays:
+                            if int(r['channel_id']) == ch_id:
+                                target_relay = r
+                                break
+                if target_relay is None:
+                    if len(relays) == 1:
+                        target_relay = relays[0]
+                    else:
+                        try:
+                            await message.channel.send(
+                                "⚠️ Tu as plusieurs contrats anonymes actifs. "
+                                "**Réponds** (clic droit → Répondre) à un message que je t'ai "
+                                "relayé pour choisir le bon salon.")
+                        except Exception:
+                            pass
+                        return
+                channel = self.get_channel(int(target_relay['channel_id']))
+                if channel is None:
+                    await contrat_relay_remove(int(target_relay['channel_id']))
+                    try:
+                        await message.channel.send(
+                            "❌ Le salon de ce contrat n'existe plus, le relais est fermé.")
+                    except Exception:
+                        pass
+                    return
+                content = (message.content or "").strip()
+                if message.attachments:
+                    extra = "\n".join(a.url for a in message.attachments)
+                    content = (content + "\n" + extra).strip()
+                if not content:
+                    return
+                relay_embed = discord.Embed(
+                    description=f"# Missive reçue du Commanditaire\n\n{_format_missive(content)}",
+                    color=CONTRAT_MISSIVE_COLOR)
+                relay_embed.set_footer(text="Expéditeur anonyme")
+                try:
+                    await channel.send(embed=relay_embed)
+                    await message.channel.send(
+                        "✅ Message transmis **anonymement** dans le salon du contrat.")
+                except Exception:
+                    try:
+                        await message.channel.send(
+                            "❌ Impossible de transmettre ton message (le bot n'a peut-être "
+                            "plus accès au salon).")
+                    except Exception:
+                        pass
+                return
+
+        elif getattr(message.channel, "category_id", None) == CONTRAT_CATEGORY_ID:
+            relay = await contrat_relay_get_by_channel(message.channel.id)
+            if relay:
+                commanditaire_id = int(relay['commanditaire_id'])
+                if message.author.id != commanditaire_id:
+                    content = (message.content or "").strip()
+                    if message.attachments:
+                        extra = "\n".join(a.url for a in message.attachments)
+                        content = (content + "\n" + extra).strip()
+                    if content:
+                        target = self.get_user(commanditaire_id)
+                        if target is None:
+                            try:
+                                target = await self.fetch_user(commanditaire_id)
+                            except Exception:
+                                target = None
+                        if target is not None:
+                            dm_relay = discord.Embed(
+                                description=f"# Missive reçue du Mercenaire\n\n{_format_missive(content)}",
+                                color=CONTRAT_MISSIVE_COLOR)
+                            dm_relay.set_footer(
+                                text=f"De {message.author.display_name} — réponds à ce message pour répondre")
+                            try:
+                                sent = await target.send(embed=dm_relay)
+                                if not hasattr(self, '_contrat_dm_routes'):
+                                    self._contrat_dm_routes = {}
+                                self._contrat_dm_routes[sent.id] = message.channel.id
+                                if len(self._contrat_dm_routes) > 2000:
+                                    for k in list(self._contrat_dm_routes)[:1000]:
+                                        self._contrat_dm_routes.pop(k, None)
+                            except Exception:
+                                pass
+                return
+
         is_bot_ping = message.guild and (self.user in message.mentions or (message.reference and message.reference.resolved and hasattr(message.reference.resolved, 'author') and message.reference.resolved.author == self.user))
         if is_bot_ping:
             user = message.author
@@ -1841,213 +1936,6 @@ class NexusBot(discord.Client):
                         await send_protection_log(message.guild, "anti_toxicity", user, f"{user} a envoyé un message toxique.")
                         await log_to_db('warn', f'Toxicity blocked: {user} in {message.guild.name}')
                         return
-
-        if message.content.strip().startswith(".") and message.guild:
-            if not await is_owner_or_ownerlist(message.guild, message.author.id):
-                embed = discord.Embed(description="❌ Seuls les membres de la ownerlist peuvent utiliser les commandes du bot.", color=0x2b2d31)
-                await message.channel.send(embed=embed)
-                return
-
-        if message.content.strip().lower() == ".help":
-            cmd_ids = await get_command_ids(message.guild) if message.guild else {}
-            embed = build_help_embed(cmd_ids)
-            await message.channel.send(embed=embed)
-            await log_to_db('info', f'.help used by {message.author} in #{message.channel}')
-            return
-
-        if message.content.strip().lower().startswith(".ownerlist"):
-            if not message.guild:
-                return
-            if message.author.id != BOT_OWNER_ID and not await is_guild_licensed(message.guild.id):
-                embed = discord.Embed(description="⚠️ Ce serveur n'a pas de licence active. Utilisez `/key` pour activer le bot.", color=0x2b2d31)
-                await message.channel.send(embed=embed)
-                return
-            if not await is_bot_owner_or_server_owner(message.guild, message.author.id):
-                await message.channel.send("Seul le propriétaire du bot ou le créateur du serveur peut utiliser cette commande.")
-                return
-
-            parts = message.content.strip().split()
-            if len(parts) == 1:
-                if pool:
-                    rows = await pool.fetch(
-                        "SELECT user_id FROM ownerlist WHERE guild_id = $1",
-                        str(message.guild.id)
-                    )
-                    if not rows:
-                        embed = discord.Embed(description="La ownerlist est vide.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                    else:
-                        lines = [f"<@{row['user_id']}>" for row in rows]
-                        embed = discord.Embed(description="\n".join(lines), color=0x2b2d31)
-                        embed.set_author(name="Ownerlist")
-                        await message.channel.send(embed=embed)
-                return
-
-            if len(parts) >= 2 and message.mentions:
-                member = message.mentions[0]
-                if member.id == message.guild.owner_id:
-                    await message.channel.send("Le créateur du serveur est déjà protégé.")
-                    return
-
-                if pool:
-                    existing = await pool.fetchrow(
-                        "SELECT id FROM ownerlist WHERE guild_id = $1 AND user_id = $2",
-                        str(message.guild.id), str(member.id)
-                    )
-                    if existing:
-                        await pool.execute(
-                            "DELETE FROM ownerlist WHERE guild_id = $1 AND user_id = $2",
-                            str(message.guild.id), str(member.id)
-                        )
-                        embed = discord.Embed(description=f"{member.mention} a été retiré de la ownerlist.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} removed {member} from ownerlist in {message.guild.name}')
-                    else:
-                        await pool.execute(
-                            "INSERT INTO ownerlist (guild_id, user_id) VALUES ($1, $2)",
-                            str(message.guild.id), str(member.id)
-                        )
-                        embed = discord.Embed(description=f"{member.mention} a été ajouté à la ownerlist.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} added {member} to ownerlist in {message.guild.name}')
-                return
-
-        if message.content.strip().lower().startswith(".whitelist"):
-            if not message.guild:
-                return
-            if message.author.id != BOT_OWNER_ID and not await is_guild_licensed(message.guild.id):
-                embed = discord.Embed(description="⚠️ Ce serveur n'a pas de licence active. Utilisez `/key` pour activer le bot.", color=0x2b2d31)
-                await message.channel.send(embed=embed)
-                return
-            is_allowed = await is_owner_or_ownerlist(message.guild, message.author.id)
-            if not is_allowed:
-                await message.channel.send("Seul le créateur ou un membre de la ownerlist peut utiliser cette commande.")
-                return
-
-            parts = message.content.strip().split()
-            if len(parts) == 1:
-                if pool:
-                    rows = await pool.fetch(
-                        "SELECT user_id FROM whitelist WHERE guild_id = $1",
-                        str(message.guild.id)
-                    )
-                    if not rows:
-                        embed = discord.Embed(description="La whitelist est vide.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                    else:
-                        lines = [f"<@{row['user_id']}>" for row in rows]
-                        embed = discord.Embed(description="\n".join(lines), color=0x2b2d31)
-                        embed.set_author(name="Whitelist")
-                        await message.channel.send(embed=embed)
-                return
-
-            if len(parts) >= 2 and message.mentions:
-                member = message.mentions[0]
-                if pool:
-                    existing = await pool.fetchrow(
-                        "SELECT id FROM whitelist WHERE guild_id = $1 AND user_id = $2",
-                        str(message.guild.id), str(member.id)
-                    )
-                    if existing:
-                        await pool.execute(
-                            "DELETE FROM whitelist WHERE guild_id = $1 AND user_id = $2",
-                            str(message.guild.id), str(member.id)
-                        )
-                        embed = discord.Embed(description=f"{member.mention} a été retiré de la whitelist.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} removed {member} from whitelist in {message.guild.name}')
-                    else:
-                        await pool.execute(
-                            "INSERT INTO whitelist (guild_id, user_id) VALUES ($1, $2)",
-                            str(message.guild.id), str(member.id)
-                        )
-                        embed = discord.Embed(description=f"{member.mention} a été ajouté à la whitelist.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} added {member} to whitelist in {message.guild.name}')
-                return
-
-        if message.content.strip().lower().startswith(".blacklist"):
-            if not message.guild:
-                return
-            if message.author.id != BOT_OWNER_ID and not await is_guild_licensed(message.guild.id):
-                embed = discord.Embed(description="⚠️ Ce serveur n'a pas de licence active. Utilisez `/key` pour activer le bot.", color=0x2b2d31)
-                await message.channel.send(embed=embed)
-                return
-            is_allowed = await can_use_bot(message.guild, message.author.id)
-            if not is_allowed:
-                await message.channel.send("Vous ne pouvez pas utiliser le bot.")
-                return
-
-            parts = message.content.strip().split()
-            if len(parts) == 1:
-                embed = await build_blacklist_embed()
-                await message.channel.send(embed=embed)
-                return
-
-            if len(parts) >= 2:
-                target = message.mentions[0] if message.mentions else None
-                if not target:
-                    try:
-                        uid = int(parts[1])
-                    except ValueError:
-                        await message.channel.send("Utilisez `.blacklist @user` ou `.blacklist <ID>`.")
-                        return
-                else:
-                    uid = target.id
-
-                if uid == message.author.id:
-                    await message.channel.send("Vous ne pouvez pas vous blacklister vous-même.")
-                    return
-                if uid == bot.user.id:
-                    await message.channel.send("Vous ne pouvez pas blacklister le bot.")
-                    return
-
-                if uid == BOT_OWNER_ID:
-                    await message.channel.send("Vous ne pouvez pas blacklister le propriétaire du bot.")
-                    return
-
-                if pool:
-                    existing = await pool.fetchrow(
-                        "SELECT id, added_by FROM blacklist WHERE user_id = $1",
-                        str(uid)
-                    )
-                    if existing:
-                        added_by = existing['added_by']
-                        is_bot_owner = message.author.id == BOT_OWNER_ID
-                        is_guild_owner = message.guild and message.guild.owner_id == message.author.id
-                        is_adder = added_by == str(message.author.id)
-                        if not (is_bot_owner or is_guild_owner or is_adder):
-                            await message.channel.send("❌ Seul la personne qui a blacklisté cet utilisateur, le propriétaire du bot ou le créateur du serveur peut l'unblacklist.")
-                            return
-                        await pool.execute("DELETE FROM blacklist WHERE user_id = $1", str(uid))
-                        for guild in bot.guilds:
-                            try:
-                                await guild.unban(discord.Object(id=uid), reason="Shield Blacklist: retiré")
-                            except Exception:
-                                pass
-                        embed = discord.Embed(description=f"<@{uid}> a été retiré de la blacklist et débanni.", color=0x2b2d31)
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} removed <@{uid}> from blacklist')
-                    else:
-                        reason = " ".join(parts[2:]) if len(parts) > 2 else None
-                        await pool.execute(
-                            "INSERT INTO blacklist (user_id, reason, added_by) VALUES ($1, $2, $3)",
-                            str(uid), reason, str(message.author.id)
-                        )
-                        banned_servers = []
-                        for guild in bot.guilds:
-                            try:
-                                await guild.ban(discord.Object(id=uid), reason=f"Shield Blacklist: {reason or 'Aucune raison'}")
-                                banned_servers.append(guild.name)
-                            except Exception:
-                                pass
-                        embed = discord.Embed(
-                            description=f"<@{uid}> a bien été banni de **{len(banned_servers)}** serveur(s) avec succès.",
-                            color=0x2b2d31
-                        )
-                        await message.channel.send(embed=embed)
-                        await log_to_db('info', f'{message.author} added <@{uid}> to blacklist')
-                return
 
     async def on_message_delete(self, message):
         if not message.guild or message.author.bot:
@@ -4305,62 +4193,6 @@ async def load_all_protections(guild_id):
     return data
 
 
-@bot.tree.command(name="lock", description="Verrouiller un salon (personne ne peut parler sauf admins).")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Le salon à verrouiller")
-async def lock_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    try:
-        if not await check_license(interaction):
-            return
-        if not await can_use_bot(interaction.guild, interaction.user.id):
-            await interaction.response.send_message("Vous ne pouvez pas utiliser le bot.", ephemeral=True)
-            return
-        target = channel or interaction.channel
-        overwrite = target.overwrites_for(interaction.guild.default_role)
-        overwrite.send_messages = False
-        overwrite.send_messages_in_threads = False
-        overwrite.add_reactions = False
-        await target.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-        embed = discord.Embed(description=f"🔒 {target.mention} a été verrouillé.", color=0x2b2d31)
-        await interaction.response.send_message(embed=embed)
-        await log_to_db('info', f'/lock used by {interaction.user} on #{target.name} in {interaction.guild.name}')
-    except Exception as e:
-        logger.error(f"Error in /lock command: {traceback.format_exc()}")
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-        except Exception:
-            pass
-
-
-@bot.tree.command(name="unlock", description="Déverrouiller un salon.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Le salon à déverrouiller")
-async def unlock_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    try:
-        if not await check_license(interaction):
-            return
-        if not await can_use_bot(interaction.guild, interaction.user.id):
-            await interaction.response.send_message("Vous ne pouvez pas utiliser le bot.", ephemeral=True)
-            return
-        target = channel or interaction.channel
-        overwrite = target.overwrites_for(interaction.guild.default_role)
-        overwrite.send_messages = None
-        overwrite.send_messages_in_threads = None
-        overwrite.add_reactions = None
-        await target.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-        embed = discord.Embed(description=f"🔓 {target.mention} a été déverrouillé.", color=0x2b2d31)
-        await interaction.response.send_message(embed=embed)
-        await log_to_db('info', f'/unlock used by {interaction.user} on #{target.name} in {interaction.guild.name}')
-    except Exception as e:
-        logger.error(f"Error in /unlock command: {traceback.format_exc()}")
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-        except Exception:
-            pass
-
-
 @bot.tree.command(name="clear", description="Supprimer des messages dans un salon.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(nombre="Nombre de messages à supprimer (max 100)")
@@ -4386,93 +4218,6 @@ async def clear_command(interaction: discord.Interaction, nombre: int):
                 await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
             else:
                 await interaction.followup.send("Une erreur est survenue.", ephemeral=True)
-        except Exception:
-            pass
-
-
-@bot.tree.command(name="key", description="Activer le bot sur ce serveur avec une clé de licence.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(clé="La clé de licence à utiliser")
-async def key_command(interaction: discord.Interaction, clé: str):
-    try:
-        if not interaction.guild:
-            await interaction.response.send_message("Cette commande doit être utilisée dans un serveur.", ephemeral=True)
-            return
-
-        already = await pool.fetchrow("SELECT id FROM guild_licenses WHERE guild_id = $1", str(interaction.guild.id))
-        if already:
-            embed = discord.Embed(description="✅ Ce serveur possède déjà une licence active.", color=0x2b2d31)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        if interaction.user.id == BOT_OWNER_ID:
-            await pool.execute(
-                "INSERT INTO guild_licenses (guild_id, license_key) VALUES ($1, $2) ON CONFLICT (guild_id) DO NOTHING",
-                str(interaction.guild.id), "OWNER_BYPASS"
-            )
-            embed = discord.Embed(description="✅ Licence activée par le propriétaire du bot.", color=0x2b2d31)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            await log_to_db('info', f'License activated (owner bypass) for guild {interaction.guild.name} ({interaction.guild.id})')
-            return
-
-        is_server_owner = interaction.user.id == interaction.guild.owner_id
-        has_admin = interaction.user.guild_permissions.administrator
-        if not is_server_owner and not has_admin:
-            await interaction.response.send_message("Seul le créateur du serveur ou un membre avec la permission Administrateur peut utiliser cette commande.", ephemeral=True)
-            return
-
-        valid_key = await pool.fetchrow("SELECT id, key FROM license_keys WHERE key = $1 AND used_by_guild IS NULL", clé)
-        if not valid_key:
-            embed = discord.Embed(description="❌ Clé invalide ou déjà utilisée.", color=0x2b2d31)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        await pool.execute("UPDATE license_keys SET used_by_guild = $1, used_at = NOW() WHERE key = $2", str(interaction.guild.id), clé)
-        await pool.execute(
-            "INSERT INTO guild_licenses (guild_id, license_key) VALUES ($1, $2) ON CONFLICT (guild_id) DO NOTHING",
-            str(interaction.guild.id), clé
-        )
-        embed = discord.Embed(description="✅ Licence activée avec succès ! Le bot est maintenant opérationnel sur ce serveur.", color=0x2b2d31)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        await log_to_db('info', f'License {clé} activated for guild {interaction.guild.name} ({interaction.guild.id}) by {interaction.user}')
-    except Exception as e:
-        logger.error(f"Error in /key command: {traceback.format_exc()}")
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
-        except Exception:
-            pass
-
-
-@bot.tree.command(name="keys", description="Voir les clés de licence disponibles.")
-@app_commands.default_permissions(administrator=True)
-async def keys_command(interaction: discord.Interaction):
-    try:
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("❌ Commande inconnue.", ephemeral=True)
-            return
-        if not pool:
-            await interaction.response.send_message("Erreur de connexion à la base de données.", ephemeral=True)
-            return
-        rows = await pool.fetch("SELECT key, used_by_guild, used_at FROM license_keys ORDER BY id")
-        if not rows:
-            await interaction.response.send_message("Aucune clé de licence trouvée.", ephemeral=True)
-            return
-        lines = []
-        for r in rows:
-            status = f"✅ Utilisée par `{r['used_by_guild']}`" if r['used_by_guild'] else "🔑 Disponible"
-            lines.append(f"`{r['key']}` — {status}")
-        embed = discord.Embed(
-            title="Clés de licence",
-            description="\n".join(lines),
-            color=0x2b2d31
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    except Exception as e:
-        logger.error(f"Error in /keys command: {traceback.format_exc()}")
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Une erreur est survenue.", ephemeral=True)
         except Exception:
             pass
 
@@ -6980,9 +6725,68 @@ CONTRAT_COLOR_PROGRESS = 0xE67E22
 CONTRAT_COLOR_DONE = 0x2ECC71
 CONTRAT_COLOR_CANCEL = 0x4F545C
 
+# Libellé affiché à la place du commanditaire pour les contrats anonymes
+CONTRAT_ANON_LABEL = "🕵️ Inconnu"
+
+# Couleur parchemin pour les missives relayées
+CONTRAT_MISSIVE_COLOR = 0xC9A66B
+
+
+def _format_missive(content: str) -> str:
+    lines = content.splitlines() or [content]
+    return "\n".join(f"> {line}" if line.strip() else ">" for line in lines)
+
+
+async def contrat_relay_add(channel_id: int, guild_id: int, commanditaire_id: int):
+    if not pool:
+        return
+    try:
+        await pool.execute(
+            "INSERT INTO contrat_anon_relay (channel_id, guild_id, commanditaire_id) "
+            "VALUES ($1, $2, $3) ON CONFLICT (channel_id) DO UPDATE "
+            "SET commanditaire_id = EXCLUDED.commanditaire_id",
+            str(channel_id), str(guild_id), str(commanditaire_id))
+    except Exception as e:
+        logger.error(f"contrat_relay_add error: {e}")
+
+
+async def contrat_relay_remove(channel_id: int):
+    if not pool:
+        return
+    try:
+        await pool.execute(
+            "DELETE FROM contrat_anon_relay WHERE channel_id = $1", str(channel_id))
+    except Exception as e:
+        logger.error(f"contrat_relay_remove error: {e}")
+
+
+async def contrat_relay_get_by_channel(channel_id: int):
+    if not pool:
+        return None
+    try:
+        return await pool.fetchrow(
+            "SELECT channel_id, guild_id, commanditaire_id FROM contrat_anon_relay "
+            "WHERE channel_id = $1", str(channel_id))
+    except Exception as e:
+        logger.error(f"contrat_relay_get_by_channel error: {e}")
+        return None
+
+
+async def contrat_relay_list_by_commanditaire(commanditaire_id: int):
+    if not pool:
+        return []
+    try:
+        return await pool.fetch(
+            "SELECT channel_id, guild_id, commanditaire_id FROM contrat_anon_relay "
+            "WHERE commanditaire_id = $1 ORDER BY created_at DESC",
+            str(commanditaire_id))
+    except Exception as e:
+        logger.error(f"contrat_relay_list_by_commanditaire error: {e}")
+        return []
+
 
 def build_contrat_embed(*, type_key, titre, recompense, objectif, conditions,
-                        delai, commanditaire_id, statut, color):
+                        delai, commanditaire_id, statut, color, anonyme=False):
     t = CONTRAT_TYPES.get(type_key, {})
     embed = discord.Embed(
         title=f"{t.get('emoji', '📕')} {t.get('label', 'Contrat')}",
@@ -6996,7 +6800,8 @@ def build_contrat_embed(*, type_key, titre, recompense, objectif, conditions,
     embed.add_field(name=CTF_OBJ, value=objectif or "—", inline=False)
     embed.add_field(name=CTF_COND, value=conditions or "—", inline=False)
     embed.add_field(name=CTF_TITRE, value=titre or "—", inline=False)
-    embed.add_field(name=CTF_COMMAND, value=f"<@{commanditaire_id}>", inline=True)
+    commanditaire_value = CONTRAT_ANON_LABEL if anonyme else f"<@{commanditaire_id}>"
+    embed.add_field(name=CTF_COMMAND, value=commanditaire_value, inline=True)
     embed.add_field(name=CTF_STATUT, value=statut, inline=True)
     return embed
 
@@ -7013,10 +6818,12 @@ class ContratModal(discord.ui.Modal):
     delai = discord.ui.TextInput(
         label="Délai", placeholder="Ex : sous 7 jours RP (optionnel)", max_length=100, required=False)
 
-    def __init__(self, *, type_key):
+    def __init__(self, *, type_key, anonyme=False):
         self._type_key = type_key
+        self._anonyme = anonyme
         t = CONTRAT_TYPES.get(type_key, {})
-        super().__init__(title=f"Nouveau — {t.get('label', 'Contrat')}")
+        suffix = " (anonyme)" if anonyme else ""
+        super().__init__(title=f"Nouveau — {t.get('label', 'Contrat')}{suffix}")
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -7036,6 +6843,7 @@ class ContratModal(discord.ui.Modal):
             commanditaire_id=interaction.user.id,
             statut="🟢 Ouvert",
             color=CONTRAT_COLOR_OPEN,
+            anonyme=self._anonyme,
         )
         view = make_contrat_open_view(interaction.user.id)
         channel = interaction.guild.get_channel(CONTRAT_PUBLISH_CHANNEL_ID)
@@ -7046,8 +6854,16 @@ class ContratModal(discord.ui.Modal):
             return
         try:
             await channel.send(embed=embed, view=view)
-            await interaction.followup.send(f"✅ Contrat publié dans {channel.mention}.", ephemeral=True)
-            await log_to_db('info', f'Contrat ({self._type_key}) publié par {interaction.user} dans {interaction.guild.name}')
+            confirm = "✅ Contrat publié dans {}.".format(channel.mention)
+            if self._anonyme:
+                confirm += (
+                    "\n🕵️ **Mode anonyme :** ton identité restera cachée. "
+                    "Quand un mercenaire prendra le contrat, je t'écrirai en MP — "
+                    "tu pourras me répondre ici et je transmettrai tes messages "
+                    "anonymement dans le salon privé."
+                )
+            await interaction.followup.send(confirm, ephemeral=True)
+            await log_to_db('info', f'Contrat ({self._type_key}{" anonyme" if self._anonyme else ""}) publié par {interaction.user} dans {interaction.guild.name}')
         except discord.Forbidden:
             await interaction.followup.send("❌ Le bot ne peut pas écrire dans le salon des contrats.", ephemeral=True)
         except Exception as e:
@@ -7139,6 +6955,7 @@ class ContratAcceptButton(
         guild = interaction.guild
         embed = interaction.message.embeds[0]
         titre = _contrat_field(embed, CTF_TITRE) or "Contrat"
+        is_anon = _contrat_field(embed, CTF_COMMAND) == CONTRAT_ANON_LABEL
         creator = await _contrat_fetch_member(guild, self.author_id)
 
         category = guild.get_channel(CONTRAT_CATEGORY_ID)
@@ -7151,7 +6968,7 @@ class ContratAcceptButton(
 
         try:
             private_channel = await _contrat_open_private_channel(
-                guild, creator, member, category, titre=titre)
+                guild, None if is_anon else creator, member, category, titre=titre)
         except discord.Forbidden:
             logger.error("Contrat: permission manquante pour créer le salon privé.")
             await interaction.followup.send(
@@ -7172,28 +6989,54 @@ class ContratAcceptButton(
         await interaction.message.edit(
             embed=embed, view=make_contrat_progress_view(self.author_id, member.id))
 
-        intro = discord.Embed(
-            title="💬 Discussion de contrat",
-            description=(
+        if is_anon:
+            intro_desc = (
+                f"Salon privé entre le **commanditaire anonyme** ({CONTRAT_ANON_LABEL}) "
+                f"et {member.mention} (mercenaire).\n\n"
+                f"**Contrat :** {titre}\n"
+                "Le commanditaire reste **anonyme** : il suit la discussion via ses MP. "
+                "Tout ce que tu écris ici lui est transmis, et ses réponses apparaîtront "
+                "ici sous le nom 🕵️ **Commanditaire (anonyme)**."
+            )
+        else:
+            intro_desc = (
                 f"Salon privé entre {creator.mention if creator else '`commanditaire`'} "
                 f"(commanditaire) et {member.mention} (mercenaire).\n\n"
                 f"**Contrat :** {titre}\n"
                 "Vous pouvez discuter librement ici des détails du contrat."
-            ),
+            )
+        intro = discord.Embed(
+            title="💬 Discussion de contrat",
+            description=intro_desc,
             color=CONTRAT_COLOR_PROGRESS,
         )
-        mentions = member.mention + (f" {creator.mention}" if creator else "")
+        if is_anon:
+            mentions = member.mention
+        else:
+            mentions = member.mention + (f" {creator.mention}" if creator else "")
         try:
             await private_channel.send(content=mentions, embed=intro, view=ContratCloseView())
         except Exception:
             pass
 
-        dm_embed = discord.Embed(
-            title="📕 Ton contrat a été pris !",
-            description=(
+        if is_anon:
+            await contrat_relay_add(private_channel.id, guild.id, self.author_id)
+
+        if is_anon:
+            dm_desc = (
+                f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
+                "🕵️ Ton identité reste **anonyme**. Pour discuter avec le mercenaire, "
+                "**réponds simplement à ce message privé** : je transmettrai tes messages "
+                "anonymement dans le salon du contrat, et je te renverrai ici ses réponses."
+            )
+        else:
+            dm_desc = (
                 f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
                 f"Un salon privé a été ouvert : {private_channel.mention}"
-            ),
+            )
+        dm_embed = discord.Embed(
+            title="📕 Ton contrat a été pris !",
+            description=dm_desc,
             color=CONTRAT_COLOR_PROGRESS,
         )
         dm_target = creator
@@ -7204,11 +7047,19 @@ class ContratAcceptButton(
                 dm_target = None
         dm_ok = await _contrat_send_dm(dm_target, dm_embed)
         if not dm_ok:
-            try:
-                await private_channel.send(
+            if is_anon:
+                warn = (
+                    "⚠️ Le **commanditaire anonyme** n'a pas pu être prévenu en MP "
+                    "(messages privés fermés ?). Le relais anonyme ne fonctionnera "
+                    "peut-être pas tant qu'il ne m'a pas écrit. Le contrat a bien été pris."
+                )
+            else:
+                warn = (
                     f"⚠️ <@{self.author_id}> (commanditaire) n'a pas pu être prévenu en MP "
                     "(messages privés fermés ?). Le contrat a bien été pris."
                 )
+            try:
+                await private_channel.send(warn)
             except Exception:
                 pass
 
@@ -7351,10 +7202,27 @@ class ContratCloseView(discord.ui.View):
             return
         await interaction.response.send_message(
             f"🔒 Salon fermé par {interaction.user.mention}. Suppression dans 5 secondes…")
+        relay = await contrat_relay_get_by_channel(interaction.channel.id)
         await asyncio.sleep(5)
+        channel_id = interaction.channel.id
         try:
             await interaction.channel.delete(
                 reason=f"Salon de contrat fermé par {interaction.user}")
+            if relay:
+                await contrat_relay_remove(channel_id)
+                target = bot.get_user(int(relay['commanditaire_id']))
+                if target is None:
+                    try:
+                        target = await bot.fetch_user(int(relay['commanditaire_id']))
+                    except Exception:
+                        target = None
+                if target is not None:
+                    try:
+                        await target.send(
+                            "🔒 Le salon de ton contrat anonyme a été fermé. "
+                            "Le relais est désormais terminé.")
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"Contrat: échec suppression salon privé : {e}\n{traceback.format_exc()}")
             try:
@@ -7369,24 +7237,34 @@ class ContratPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def _open(self, interaction: discord.Interaction, type_key: str):
+    async def _open(self, interaction: discord.Interaction, type_key: str, anonyme: bool = False):
         member = await _resolve_member(interaction)
         if not _has_any_role(member, CONTRAT_CREATOR_ROLE_IDS):
             await interaction.response.send_message(
                 "❌ Seuls le Ministère, les Aurors et les Mangemorts peuvent créer un contrat.",
                 ephemeral=True)
             return
-        await interaction.response.send_modal(ContratModal(type_key=type_key))
+        await interaction.response.send_modal(ContratModal(type_key=type_key, anonyme=anonyme))
 
     @discord.ui.button(label="Mercenariat", style=discord.ButtonStyle.danger,
-                       emoji="🗡️", custom_id="contrat_new_merc")
+                       emoji="🗡️", custom_id="contrat_new_merc", row=0)
     async def new_merc(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._open(interaction, "merc")
 
     @discord.ui.button(label="Contrat spécial", style=discord.ButtonStyle.secondary,
-                       emoji="⭐", custom_id="contrat_new_spe")
+                       emoji="⭐", custom_id="contrat_new_spe", row=0)
     async def new_spe(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._open(interaction, "spe")
+
+    @discord.ui.button(label="Mercenariat anonyme", style=discord.ButtonStyle.danger,
+                       emoji="🕵️", custom_id="contrat_new_merc_anon", row=1)
+    async def new_merc_anon(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open(interaction, "merc", anonyme=True)
+
+    @discord.ui.button(label="Contrat spécial anonyme", style=discord.ButtonStyle.secondary,
+                       emoji="🕵️", custom_id="contrat_new_spe_anon", row=1)
+    async def new_spe_anon(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open(interaction, "spe", anonyme=True)
 
 
 @bot.tree.command(name="contratbook", description="Poster le livre de contrats (bingo book).")
@@ -7408,6 +7286,9 @@ async def contratbook_command(interaction: discord.Interaction):
             "Bienvenue dans le **livre de contrats** de la faction.\n\n"
             "🗡️ **Mercenariat** — propose une mission rémunérée (cible, récompense, délai).\n"
             "⭐ **Contrat spécial** — pour les contrats hors du commun.\n\n"
+            "🕵️ **Versions anonymes** — ton identité reste cachée. Le mercenaire ne saura "
+            "jamais qui tu es ; tu discuteras avec lui via mes MP (je relaie tes messages "
+            "anonymement dans le salon privé).\n\n"
             "Choisis ci-dessous le type de contrat à publier."
         ),
         color=CONTRAT_COLOR_OPEN,
@@ -7435,24 +7316,61 @@ WANTED_CHANNEL_ID = 1519500581960421417
 WANTED_COLOR = 0x5DADE2
 
 
-class WantedModal(discord.ui.Modal):
+class WantedModalStep1(discord.ui.Modal):
+    nom = discord.ui.TextInput(
+        label="Nom", placeholder="Nom / identité de la personne recherchée", max_length=100, required=True)
     rang = discord.ui.TextInput(
         label="Rang", placeholder="Ex : S, A, B…", max_length=100, required=True)
     appartenance = discord.ui.TextInput(
         label="Appartenance", placeholder="Ex : Mangemort, Indépendant…", max_length=100, required=True)
     condition = discord.ui.TextInput(
         label="Condition de Réussite", style=discord.TextStyle.paragraph, max_length=500, required=True)
-    autre = discord.ui.TextInput(
-        label="Autre", style=discord.TextStyle.paragraph, max_length=500, required=False)
     prime = discord.ui.TextInput(
         label="Prime", placeholder="Ex : 50 000 gallions…", max_length=200, required=True)
 
-    def __init__(self, *, photo: discord.Attachment = None, lien_image: str = None):
-        self._photo = photo
-        self._lien_image = lien_image
-        super().__init__(title="Avis de recherche")
+    def __init__(self):
+        super().__init__(title="Avis de recherche (1/2)")
 
     async def on_submit(self, interaction: discord.Interaction):
+        data = {
+            "nom": self.nom.value,
+            "rang": self.rang.value,
+            "appartenance": self.appartenance.value,
+            "condition": self.condition.value,
+            "prime": self.prime.value,
+        }
+        await interaction.response.send_message(
+            "✅ Étape 1 enregistrée. Clique sur **Continuer** pour ajouter le champ *Autre* "
+            "et le **lien de l'image**, puis publier l'avis.",
+            view=WantedStep2View(data), ephemeral=True)
+
+
+class WantedStep2View(discord.ui.View):
+    def __init__(self, data: dict):
+        super().__init__(timeout=300)
+        self._data = data
+
+    @discord.ui.button(label="Continuer", style=discord.ButtonStyle.primary, emoji="➡️")
+    async def cont(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(WantedModalStep2(self._data))
+
+
+class WantedModalStep2(discord.ui.Modal):
+    autre = discord.ui.TextInput(
+        label="Autre", style=discord.TextStyle.paragraph, max_length=500, required=False)
+    lien_image = discord.ui.TextInput(
+        label="Lien de l'image", placeholder="https://…", max_length=500, required=True)
+
+    def __init__(self, data: dict):
+        self._data = data
+        super().__init__(title="Avis de recherche (2/2)")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lien = self.lien_image.value.strip()
+        if not lien.lower().startswith(("http://", "https://")):
+            await interaction.response.send_message(
+                "❌ Le lien de l'image doit commencer par `http://` ou `https://`.", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         channel = interaction.guild.get_channel(WANTED_CHANNEL_ID)
         if channel is None:
@@ -7460,41 +7378,29 @@ class WantedModal(discord.ui.Modal):
                 "❌ Salon du Wanted Book introuvable. Préviens un administrateur.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title="🎯 AVIS DE RECHERCHE",
-            color=WANTED_COLOR,
-            timestamp=datetime.datetime.utcnow(),
+        d = self._data
+        body = (
+            f"**Rang :** {d['rang']}   •   "
+            f"**Appartenance :** {d['appartenance']}   •   "
+            f"**Prime :** {d['prime']}\n"
+            f"**Condition de Réussite :** {d['condition']}\n"
+            f"**Autre :** {self.autre.value or '—'}"
         )
-        embed.add_field(name="Rang", value=self.rang.value, inline=True)
-        embed.add_field(name="Appartenance", value=self.appartenance.value, inline=True)
-        embed.add_field(name="Condition de Réussite", value=self.condition.value, inline=True)
-        embed.add_field(name="Autre", value=self.autre.value or "—", inline=True)
-        embed.add_field(name="Prime", value=self.prime.value, inline=True)
-        embed.set_footer(text=f"Recensé par {interaction.user.display_name}")
 
-        file = None
-        if self._photo is not None:
-            ext = self._photo.filename.rsplit('.', 1)[-1].lower() if '.' in self._photo.filename else 'png'
-            safe_name = f"wanted_image.{ext}"
-            try:
-                file = await self._photo.to_file(filename=safe_name)
-                embed.set_image(url=f"attachment://{safe_name}")
-            except Exception as e:
-                logger.error(f"Wanted: échec récupération photo : {e}")
-                await interaction.followup.send(
-                    "❌ Impossible de récupérer la photo. Réessaie en relançant /wanted.", ephemeral=True)
-                return
-        elif self._lien_image:
-            embed.set_image(url=self._lien_image)
+        container = discord.ui.Container(accent_colour=WANTED_COLOR)
+        container.add_item(discord.ui.TextDisplay(f"# 🎯 AVIS DE RECHERCHE — {d['nom']}"))
+        container.add_item(discord.ui.TextDisplay(body))
+        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(lien)))
+        container.add_item(discord.ui.TextDisplay(f"-# Recensé par {interaction.user.display_name}"))
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(container)
 
         try:
-            if file is not None:
-                await channel.send(embed=embed, file=file)
-            else:
-                await channel.send(embed=embed)
+            await channel.send(view=view)
             await interaction.followup.send(
                 f"✅ Avis de recherche publié dans {channel.mention}.", ephemeral=True)
-            await log_to_db('info', f'Wanted recensé par {interaction.user} dans {interaction.guild.name}')
+            await log_to_db('info', f"Wanted ({d['nom']}) recensé par {interaction.user} dans {interaction.guild.name}")
         except discord.Forbidden:
             await interaction.followup.send(
                 "❌ Le bot ne peut pas écrire dans le salon du Wanted Book.", ephemeral=True)
@@ -7504,32 +7410,52 @@ class WantedModal(discord.ui.Modal):
                 "❌ Impossible de publier l'avis de recherche.", ephemeral=True)
 
 
-@bot.tree.command(name="wanted", description="Recenser une personne recherchée dans le Wanted Book.")
-@app_commands.describe(
-    photo="Photo à uploader (optionnel si un lien est fourni)",
-    lien_image="Lien d'une image (optionnel si une photo est uploadée)",
-)
-async def wanted_command(
-    interaction: discord.Interaction,
-    photo: discord.Attachment = None,
-    lien_image: str = None,
-):
-    member = await _resolve_member(interaction)
-    if not _has_any_role(member, WANTED_ROLE_IDS):
-        await interaction.response.send_message(
-            "❌ Seuls les membres du Ministère et les Aurors peuvent recenser une personne recherchée.",
-            ephemeral=True)
+class WantedPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Créer un avis de recherche", style=discord.ButtonStyle.danger,
+                       emoji="🎯", custom_id="wanted_create")
+    async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = await _resolve_member(interaction)
+        if not _has_any_role(member, WANTED_ROLE_IDS):
+            await interaction.response.send_message(
+                "❌ Seuls les membres du Ministère et les Aurors peuvent recenser une personne recherchée.",
+                ephemeral=True)
+            return
+        await interaction.response.send_modal(WantedModalStep1())
+
+
+@bot.tree.command(name="wanted", description="Poster le panneau du Wanted Book (avis de recherche).")
+@app_commands.default_permissions(administrator=True)
+async def wanted_command(interaction: discord.Interaction):
+    is_allowed = interaction.user.id == BOT_OWNER_ID
+    if not is_allowed and interaction.guild:
+        try:
+            is_allowed = await is_owner_or_ownerlist(interaction.guild, interaction.user.id)
+        except Exception:
+            is_allowed = False
+    if not is_allowed:
+        await interaction.response.send_message("❌ Commande inconnue.", ephemeral=True)
         return
-    if photo is None and not lien_image:
-        await interaction.response.send_message(
-            "❌ Tu dois fournir une **photo** (upload) ou un **lien d'image** lors de l'appel de la commande.",
-            ephemeral=True)
-        return
-    if photo is not None and not (photo.content_type and photo.content_type.startswith("image/")):
-        await interaction.response.send_message(
-            "❌ Le fichier uploadé n'est pas une image valide.", ephemeral=True)
-        return
-    await interaction.response.send_modal(WantedModal(photo=photo, lien_image=lien_image))
+    await interaction.response.defer(ephemeral=True)
+    embed = discord.Embed(
+        title="🎯 Wanted Book",
+        description=(
+            "Bienvenue dans le **Wanted Book**.\n\n"
+            "Clique sur le bouton ci-dessous pour recenser une personne recherchée "
+            "et publier un **avis de recherche**.\n\n"
+            "*Réservé au Ministère et aux Aurors.*"
+        ),
+        color=WANTED_COLOR,
+    )
+    try:
+        await interaction.channel.send(embed=embed, view=WantedPanelView())
+        await interaction.followup.send(f"✅ Panneau du Wanted Book posté dans {interaction.channel.mention}.", ephemeral=True)
+        await log_to_db('info', f'/wanted (panneau) posté par {interaction.user} dans {interaction.guild.name}')
+    except Exception as e:
+        logger.error(f"Erreur /wanted : {e}\n{traceback.format_exc()}")
+        await interaction.followup.send("❌ Impossible de poster le panneau du Wanted Book.", ephemeral=True)
 
 
 @bot.tree.command(name="closeticket", description="Fermer (supprimer) le ticket en cours.")
