@@ -405,6 +405,8 @@ class NexusCommandTree(app_commands.CommandTree):
             return True
         try:
             cmd = interaction.command
+            if getattr(cmd, "name", None) == "wanted":
+                return True
             is_admincap = (
                 cmd is not None
                 and hasattr(cmd, "parent")
@@ -7235,15 +7237,16 @@ class ContratDoneButton(
         return cls(int(match['author']), int(match['accepter']))
 
     async def callback(self, interaction: discord.Interaction):
-        member = await _resolve_member(interaction)
-        if not _has_role(member, CONTRAT_ACCEPT_ROLE_ID):
+        if interaction.user.id != self.accepter_id:
             await interaction.response.send_message(
-                "❌ Tu n'as pas le rôle requis.", ephemeral=True)
+                "❌ Seule la personne qui a pris ce contrat peut le marquer comme terminé.",
+                ephemeral=True)
             return
         if not interaction.message or not interaction.message.embeds:
             await interaction.response.send_message("❌ Contrat introuvable.", ephemeral=True)
             return
         await interaction.response.defer()
+        member = interaction.user
         embed = interaction.message.embeds[0]
         _contrat_set_status(embed, f"✅ Terminé — validé par {member.mention}")
         embed.color = discord.Color(CONTRAT_COLOR_DONE)
@@ -7258,14 +7261,13 @@ class ContratDoneButton(
             ),
             color=CONTRAT_COLOR_DONE,
         )
-        for uid in {self.author_id, self.accepter_id}:
-            target = await _contrat_fetch_member(guild, uid)
-            if target is None:
-                try:
-                    target = await bot.fetch_user(uid)
-                except Exception:
-                    target = None
-            await _contrat_send_dm(target, dm_embed)
+        target = await _contrat_fetch_member(guild, self.author_id)
+        if target is None:
+            try:
+                target = await bot.fetch_user(self.author_id)
+            except Exception:
+                target = None
+        await _contrat_send_dm(target, dm_embed)
 
         try:
             await log_to_db('info', f'Contrat terminé par {member} dans {interaction.guild.name}')
@@ -7296,15 +7298,16 @@ class ContratCancelButton(
         return cls(int(match['author']), int(accepter) if accepter else None)
 
     async def callback(self, interaction: discord.Interaction):
-        member = await _resolve_member(interaction)
-        if not (_has_any_role(member, CONTRAT_CREATOR_ROLE_IDS) or _has_role(member, CONTRAT_ACCEPT_ROLE_ID)):
+        if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "❌ Tu n'as pas le rôle requis pour annuler ce contrat.", ephemeral=True)
+                "❌ Seul le commanditaire (celui qui a créé le contrat) peut l'annuler.",
+                ephemeral=True)
             return
         if not interaction.message or not interaction.message.embeds:
             await interaction.response.send_message("❌ Contrat introuvable.", ephemeral=True)
             return
         await interaction.response.defer()
+        member = interaction.user
         embed = interaction.message.embeds[0]
         _contrat_set_status(embed, f"🚫 Annulé par {member.mention}")
         embed.color = discord.Color(CONTRAT_COLOR_CANCEL)
@@ -7416,6 +7419,101 @@ async def contratbook_command(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Erreur /contratbook : {e}\n{traceback.format_exc()}")
         await interaction.followup.send("❌ Impossible de poster le livre de contrats.", ephemeral=True)
+
+
+# ════════════════════ WANTED BOOK / AVIS DE RECHERCHE ════════════════════
+
+# Rôles autorisés à recenser une personne recherchée
+WANTED_ROLE_IDS = [
+    1062740125559300163,  # Ministère
+    1062740125517348875,  # Auror
+]
+
+# Salon où sont publiés les avis de recherche
+WANTED_CHANNEL_ID = 1519500581960421417
+
+WANTED_COLOR = 0xC0392B
+
+
+@bot.tree.command(name="wanted", description="Recenser une personne recherchée dans le Wanted Book.")
+@app_commands.describe(
+    nom="Nom / identité de la personne recherchée",
+    rang="Rang",
+    appartenance="Appartenance",
+    condition="Condition de Réussite",
+    prime="Prime",
+    autre="Autre (optionnel)",
+    photo="Photo à uploader (optionnel si un lien est fourni)",
+    lien_image="Lien d'une image (optionnel si une photo est uploadée)",
+)
+async def wanted_command(
+    interaction: discord.Interaction,
+    nom: str,
+    rang: str,
+    appartenance: str,
+    condition: str,
+    prime: str,
+    autre: str = None,
+    photo: discord.Attachment = None,
+    lien_image: str = None,
+):
+    member = await _resolve_member(interaction)
+    if not _has_any_role(member, WANTED_ROLE_IDS):
+        await interaction.response.send_message(
+            "❌ Seuls les membres du Ministère et les Aurors peuvent recenser une personne recherchée.",
+            ephemeral=True)
+        return
+    if photo is None and not lien_image:
+        await interaction.response.send_message(
+            "❌ Tu dois fournir une **photo** (upload) ou un **lien d'image**.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    channel = interaction.guild.get_channel(WANTED_CHANNEL_ID)
+    if channel is None:
+        await interaction.followup.send(
+            "❌ Salon du Wanted Book introuvable. Préviens un administrateur.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"🎯 AVIS DE RECHERCHE — {nom}",
+        color=WANTED_COLOR,
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.add_field(name="🎖️ Rang", value=rang, inline=True)
+    embed.add_field(name="🏛️ Appartenance", value=appartenance, inline=True)
+    embed.add_field(name="✅ Condition de Réussite", value=condition, inline=False)
+    embed.add_field(name="📌 Autre", value=autre or "—", inline=False)
+    embed.add_field(name="💰 Prime", value=prime, inline=True)
+    embed.set_footer(text=f"Recensé par {interaction.user.display_name}")
+
+    file = None
+    if photo is not None:
+        if not (photo.content_type and photo.content_type.startswith("image/")):
+            await interaction.followup.send(
+                "❌ Le fichier uploadé n'est pas une image valide.", ephemeral=True)
+            return
+        ext = photo.filename.rsplit('.', 1)[-1].lower() if '.' in photo.filename else 'png'
+        safe_name = f"wanted_image.{ext}"
+        file = await photo.to_file(filename=safe_name)
+        embed.set_image(url=f"attachment://{safe_name}")
+    elif lien_image:
+        embed.set_image(url=lien_image)
+
+    try:
+        if file is not None:
+            await channel.send(embed=embed, file=file)
+        else:
+            await channel.send(embed=embed)
+        await interaction.followup.send(
+            f"✅ Avis de recherche publié dans {channel.mention}.", ephemeral=True)
+        await log_to_db('info', f'Wanted ({nom}) recensé par {interaction.user} dans {interaction.guild.name}')
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ Le bot ne peut pas écrire dans le salon du Wanted Book.", ephemeral=True)
+    except Exception as e:
+        logger.error(f"Erreur /wanted : {e}\n{traceback.format_exc()}")
+        await interaction.followup.send(
+            "❌ Impossible de publier l'avis de recherche.", ephemeral=True)
 
 
 @bot.tree.command(name="closeticket", description="Fermer (supprimer) le ticket en cours.")
