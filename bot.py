@@ -7283,12 +7283,10 @@ async def contratbook_command(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📕 Livre de Contrats",
         description=(
-            "Bienvenue dans le **livre de contrats** de la faction.\n\n"
-            "🗡️ **Mercenariat** — propose une mission rémunérée (cible, récompense, délai).\n"
-            "⭐ **Contrat spécial** — pour les contrats hors du commun.\n\n"
-            "🕵️ **Versions anonymes** — ton identité reste cachée. Le mercenaire ne saura "
-            "jamais qui tu es ; tu discuteras avec lui via mes MP (je relaie tes messages "
-            "anonymement dans le salon privé).\n\n"
+            "Bienvenue dans le **livre de contrats** du monde magique.\n\n"
+            "🗡️ **Mercenariat** - propose une mission rémunérée (cible, récompense, délai).\n"
+            "⭐ **Contrat spécial** - pour les contrats hors du commun.\n\n"
+            "🕵️ **Versions anonymes** - l'auteur du contrat reste anonyme ; les deux personnes discuteront par missive anonyme.\n\n"
             "Choisis ci-dessous le type de contrat à publier."
         ),
         color=CONTRAT_COLOR_OPEN,
