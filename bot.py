@@ -4631,15 +4631,11 @@ async def gerants_command(interaction: discord.Interaction):
 
         container.add_item(discord.ui.TextDisplay(
             "## AURORS\n"
-            "> <@1413486076332605481> et <@565773187116302346>"
+            "> <@1413486076332605481> et <@565773187116302346> & <@484798244996644864>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MANGEMORT\n"
-            "> <@1413486076332605481> et <@484798244996644864> & <@1045815146511081542>"
-        ))
-        container.add_item(discord.ui.TextDisplay(
-            "## VAMPIRE\n"
-            "> <@879458572986105887>"
+            "> <@1413486076332605481> et <@1045815146511081542>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MINISTERE\n"
@@ -4647,11 +4643,7 @@ async def gerants_command(interaction: discord.Interaction):
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MAGE-INDEPENDANT\n"
-            "> <@665228481654947853>"
-        ))
-        container.add_item(discord.ui.TextDisplay(
-            "## ORDRE DU PHENIX\n"
-            "> <@380059243451121664>"
+            "> <@1413486076332605481> et <@665228481654947853>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## PROFESSEUR\n"
