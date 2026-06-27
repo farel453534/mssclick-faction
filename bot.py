@@ -6729,6 +6729,7 @@ CONTRAT_CREATOR_ROLE_IDS = [
     1062740125559300163,  # Ministère
     1062740125517348875,  # Auror
     1062740125605449874,  # Mangemort
+    1062740125475426411,  # Mercenaire (rôle d'acceptation)
 ]
 
 # Salon où sont publiés les contrats
@@ -7125,6 +7126,126 @@ async def _contrat_open_private_channel(guild, creator, acceptor, category, *, t
     return channel
 
 
+async def _contrat_create_candidature(guild, author_id, member, *, is_anon, titre,
+                                      public_channel_id, public_message_id):
+    """Crée le salon privé de candidature d'un mercenaire (comme la prise de
+    contrat) : salon, ligne en base, message de contrôle, relais + MP si anonyme.
+    Renvoie (channel, None) en cas de succès, (None, message_erreur) sinon."""
+    category = guild.get_channel(CONTRAT_CATEGORY_ID)
+    if not isinstance(category, discord.CategoryChannel):
+        return None, ("❌ La catégorie des salons de contrat est introuvable. "
+                      "Préviens un administrateur.")
+    creator = await _contrat_fetch_member(guild, author_id)
+
+    try:
+        private_channel = await _contrat_open_private_channel(
+            guild, None if is_anon else creator, member, category, titre=titre)
+    except discord.Forbidden:
+        logger.error("Contrat: permission manquante pour créer le salon privé.")
+        return None, ("❌ Je n'ai pas la permission de créer le salon privé "
+                      "(Gérer les salons).")
+    except Exception as e:
+        logger.error(f"Contrat: échec création salon privé : {e}\n{traceback.format_exc()}")
+        return None, "❌ Erreur lors de la création du salon privé."
+
+    ok_add = await contrat_salon_add(
+        private_channel.id, guild.id, 'candidature', author_id, member.id,
+        public_channel_id=public_channel_id,
+        public_message_id=public_message_id,
+        anonyme=is_anon)
+    if not ok_add:
+        try:
+            await private_channel.delete(reason="Candidature en double")
+        except Exception:
+            pass
+        return None, "ℹ️ Ce mercenaire a déjà un salon ouvert pour ce contrat."
+
+    if is_anon:
+        intro_desc = (
+            f"Salon privé entre le **commanditaire anonyme** ({CONTRAT_ANON_LABEL}) "
+            f"et {member.mention} (mercenaire).\n\n"
+            f"**Contrat :** {titre}\n"
+            "Le commanditaire reste **anonyme** : il suit la discussion via ses MP. "
+            "Tout ce que tu écris ici lui est transmis, et ses réponses apparaîtront "
+            "ici sous le nom 🕵️ **Commanditaire (anonyme)**."
+        )
+    else:
+        intro_desc = (
+            f"Salon privé entre {creator.mention if creator else '`commanditaire`'} "
+            f"(commanditaire) et {member.mention} (mercenaire).\n\n"
+            f"**Contrat :** {titre}\n"
+            "Vous pouvez discuter librement ici des détails du contrat."
+        )
+    intro = discord.Embed(
+        title="💬 Discussion de contrat",
+        description=intro_desc,
+        color=CONTRAT_COLOR_PROGRESS,
+    )
+    if is_anon:
+        mentions = member.mention
+    else:
+        mentions = member.mention + (f" {creator.mention}" if creator else "")
+    private_view = make_contrat_private_view(
+        private_channel.id, author_id, member.id, anonyme=is_anon)
+    try:
+        sent = await private_channel.send(
+            content=mentions, embed=intro, view=private_view)
+        await contrat_salon_set_control(private_channel.id, sent.id)
+    except Exception:
+        pass
+
+    if is_anon:
+        await contrat_relay_add(
+            private_channel.id, guild.id, author_id,
+            public_channel_id=public_channel_id,
+            public_message_id=public_message_id)
+        dm_desc = (
+            f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
+            "🕵️ Ton identité reste **anonyme**. Pour discuter avec le mercenaire, "
+            "**réponds simplement à ce message privé** : je transmettrai tes messages "
+            "anonymement dans le salon du contrat, et je te renverrai ici ses réponses.\n\n"
+            "Plusieurs mercenaires peuvent se proposer : avec les boutons ci-dessous, tu peux "
+            "**valider** ce mercenaire (les autres salons se fermeront), ou **annuler** / "
+            "**fermer** ce salon à tout moment."
+        )
+    else:
+        dm_desc = (
+            f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
+            f"Un salon privé a été ouvert : {private_channel.mention}"
+        )
+    dm_embed = discord.Embed(
+        title="📕 Ton contrat a été pris !",
+        description=dm_desc,
+        color=CONTRAT_COLOR_PROGRESS,
+    )
+    dm_target = creator
+    if dm_target is None:
+        try:
+            dm_target = await bot.fetch_user(author_id)
+        except Exception:
+            dm_target = None
+    dm_view = make_contrat_dm_view(private_channel.id, author_id) if is_anon else None
+    dm_ok = await _contrat_send_dm(dm_target, dm_embed, dm_view)
+    if not dm_ok:
+        if is_anon:
+            warn = (
+                "⚠️ Le **commanditaire anonyme** n'a pas pu être prévenu en MP "
+                "(messages privés fermés ?). Le relais anonyme ne fonctionnera "
+                "peut-être pas tant qu'il ne m'a pas écrit. Le contrat a bien été pris."
+            )
+        else:
+            warn = (
+                f"⚠️ <@{author_id}> (commanditaire) n'a pas pu être prévenu en MP "
+                "(messages privés fermés ?). Le contrat a bien été pris."
+            )
+        try:
+            await private_channel.send(warn)
+        except Exception:
+            pass
+
+    return private_channel, None
+
+
 class ContratAcceptButton(
     discord.ui.DynamicItem[discord.ui.Button],
     template=r'contrat_accept:(?P<author>\d+)'
@@ -7172,129 +7293,14 @@ class ContratAcceptButton(
                 ephemeral=True)
             return
 
-        category = guild.get_channel(CONTRAT_CATEGORY_ID)
-        if not isinstance(category, discord.CategoryChannel):
-            await interaction.followup.send(
-                "❌ La catégorie des salons de contrat est introuvable. "
-                "Le contrat n'a pas été pris, préviens un administrateur.",
-                ephemeral=True)
-            return
-
-        try:
-            private_channel = await _contrat_open_private_channel(
-                guild, None if is_anon else creator, member, category, titre=titre)
-        except discord.Forbidden:
-            logger.error("Contrat: permission manquante pour créer le salon privé.")
-            await interaction.followup.send(
-                "❌ Je n'ai pas la permission de créer le salon privé (Gérer les salons). "
-                "Le contrat n'a pas été pris.",
-                ephemeral=True)
-            return
-        except Exception as e:
-            logger.error(f"Contrat: échec création salon privé : {e}\n{traceback.format_exc()}")
-            await interaction.followup.send(
-                "❌ Erreur lors de la création du salon privé. Le contrat n'a pas été pris.",
-                ephemeral=True)
-            return
-
-        ok_add = await contrat_salon_add(
-            private_channel.id, guild.id, 'candidature', self.author_id, member.id,
+        private_channel, err = await _contrat_create_candidature(
+            guild, self.author_id, member,
+            is_anon=is_anon, titre=titre,
             public_channel_id=interaction.message.channel.id,
-            public_message_id=interaction.message.id,
-            anonyme=is_anon)
-        if not ok_add:
-            try:
-                await private_channel.delete(reason="Candidature en double")
-            except Exception:
-                pass
-            await interaction.followup.send(
-                "ℹ️ Tu as déjà un salon ouvert pour ce contrat.", ephemeral=True)
+            public_message_id=interaction.message.id)
+        if private_channel is None:
+            await interaction.followup.send(err, ephemeral=True)
             return
-
-        if is_anon:
-            intro_desc = (
-                f"Salon privé entre le **commanditaire anonyme** ({CONTRAT_ANON_LABEL}) "
-                f"et {member.mention} (mercenaire).\n\n"
-                f"**Contrat :** {titre}\n"
-                "Le commanditaire reste **anonyme** : il suit la discussion via ses MP. "
-                "Tout ce que tu écris ici lui est transmis, et ses réponses apparaîtront "
-                "ici sous le nom 🕵️ **Commanditaire (anonyme)**."
-            )
-        else:
-            intro_desc = (
-                f"Salon privé entre {creator.mention if creator else '`commanditaire`'} "
-                f"(commanditaire) et {member.mention} (mercenaire).\n\n"
-                f"**Contrat :** {titre}\n"
-                "Vous pouvez discuter librement ici des détails du contrat."
-            )
-        intro = discord.Embed(
-            title="💬 Discussion de contrat",
-            description=intro_desc,
-            color=CONTRAT_COLOR_PROGRESS,
-        )
-        if is_anon:
-            mentions = member.mention
-        else:
-            mentions = member.mention + (f" {creator.mention}" if creator else "")
-        private_view = make_contrat_private_view(
-            private_channel.id, self.author_id, member.id, anonyme=is_anon)
-        try:
-            sent = await private_channel.send(
-                content=mentions, embed=intro, view=private_view)
-            await contrat_salon_set_control(private_channel.id, sent.id)
-        except Exception:
-            pass
-
-        if is_anon:
-            await contrat_relay_add(
-                private_channel.id, guild.id, self.author_id,
-                public_channel_id=interaction.message.channel.id,
-                public_message_id=interaction.message.id)
-
-        if is_anon:
-            dm_desc = (
-                f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
-                "🕵️ Ton identité reste **anonyme**. Pour discuter avec le mercenaire, "
-                "**réponds simplement à ce message privé** : je transmettrai tes messages "
-                "anonymement dans le salon du contrat, et je te renverrai ici ses réponses.\n\n"
-                "Plusieurs mercenaires peuvent se proposer : avec les boutons ci-dessous, tu peux "
-                "**valider** ce mercenaire (les autres salons se fermeront), ou **annuler** / "
-                "**fermer** ce salon à tout moment."
-            )
-        else:
-            dm_desc = (
-                f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
-                f"Un salon privé a été ouvert : {private_channel.mention}"
-            )
-        dm_embed = discord.Embed(
-            title="📕 Ton contrat a été pris !",
-            description=dm_desc,
-            color=CONTRAT_COLOR_PROGRESS,
-        )
-        dm_target = creator
-        if dm_target is None:
-            try:
-                dm_target = await bot.fetch_user(self.author_id)
-            except Exception:
-                dm_target = None
-        dm_view = make_contrat_dm_view(private_channel.id, self.author_id) if is_anon else None
-        dm_ok = await _contrat_send_dm(dm_target, dm_embed, dm_view)
-        if not dm_ok:
-            if is_anon:
-                warn = (
-                    "⚠️ Le **commanditaire anonyme** n'a pas pu être prévenu en MP "
-                    "(messages privés fermés ?). Le relais anonyme ne fonctionnera "
-                    "peut-être pas tant qu'il ne m'a pas écrit. Le contrat a bien été pris."
-                )
-            else:
-                warn = (
-                    f"⚠️ <@{self.author_id}> (commanditaire) n'a pas pu être prévenu en MP "
-                    "(messages privés fermés ?). Le contrat a bien été pris."
-                )
-            try:
-                await private_channel.send(warn)
-            except Exception:
-                pass
 
         try:
             await log_to_db('info', f'Contrat pris par {member} dans {interaction.guild.name}')
@@ -7842,24 +7848,61 @@ class ContratNegoAcceptButton(
             await interaction.followup.send(
                 "ℹ️ Cette négociation est déjà clôturée.", ephemeral=True)
             return
+        titre = "Contrat"
         pub_msg = await _contrat_fetch_public_message(
             row['public_channel_id'], row['public_message_id'])
         if pub_msg and pub_msg.embeds:
             pub_embed = pub_msg.embeds[0]
+            titre = _contrat_field(pub_embed, CTF_TITRE) or "Contrat"
             _contrat_set_field(pub_embed, CTF_RECOMP, row['proposed_recompense'] or "—")
             _contrat_set_field(pub_embed, CTF_COND, row['proposed_conditions'] or "—")
             try:
                 await pub_msg.edit(embed=pub_embed)
             except Exception as e:
                 logger.error(f"Contrat: maj contrat après contre-offre échouée : {e}")
+
+        guild = interaction.guild
+        if guild is None and row['guild_id']:
+            guild = bot.get_guild(int(row['guild_id']))
+        mercenaire_id = int(row['mercenaire_id'])
+        is_anon = bool(row['anonyme'])
+        merc_member = None
+        if guild is not None:
+            merc_member = await _contrat_fetch_member(guild, mercenaire_id)
+
         await interaction.followup.send(
             "✅ Contre-offre acceptée : le contrat a été mis à jour.", ephemeral=True)
+
         await _contrat_delete_salon_channel(
             row,
             note=("✅ Le commanditaire a **accepté** la contre-offre ! Le contrat a été "
-                  "mis à jour avec la nouvelle récompense et les nouvelles conditions. "
-                  "Tu peux maintenant le **prendre** depuis l'annonce. Ce salon sera "
-                  "supprimé dans 5 secondes."))
+                  "mis à jour. Un nouveau salon va être ouvert pour finaliser. "
+                  "Ce salon sera supprimé dans 5 secondes."))
+
+        new_channel = None
+        if guild is not None and merc_member is not None:
+            new_channel, err = await _contrat_create_candidature(
+                guild, self.author_id, merc_member,
+                is_anon=is_anon, titre=titre,
+                public_channel_id=row['public_channel_id'],
+                public_message_id=row['public_message_id'])
+            if new_channel is None:
+                logger.error(f"Contrat: recréation salon après contre-offre échouée : {err}")
+                try:
+                    await merc_member.send(
+                        "⚠️ La contre-offre a été acceptée mais le nouveau salon n'a pas "
+                        "pu être créé automatiquement. Tu peux **prendre** le contrat "
+                        "depuis l'annonce.")
+                except Exception:
+                    pass
+        elif merc_member is not None:
+            try:
+                await merc_member.send(
+                    "✅ Ta contre-offre a été acceptée ! Tu peux maintenant **prendre** "
+                    "le contrat depuis l'annonce.")
+            except Exception:
+                pass
+
         try:
             await log_to_db('info', f'Contre-offre acceptée par {interaction.user}')
         except Exception:
