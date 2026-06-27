@@ -4635,7 +4635,7 @@ async def gerants_command(interaction: discord.Interaction):
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MANGEMORT\n"
-            "> <@1413486076332605481> et <@1045815146511081542>"
+            "> <@879458572986105887> et <@1045815146511081542> & <@407215406961524746>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MINISTERE\n"
