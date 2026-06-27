@@ -272,6 +272,27 @@ async def init_db():
                 "ALTER TABLE contrat_anon_relay ADD COLUMN IF NOT EXISTS public_channel_id TEXT")
             await conn.execute(
                 "ALTER TABLE contrat_anon_relay ADD COLUMN IF NOT EXISTS public_message_id TEXT")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS contrat_salon (
+                    channel_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'candidature',
+                    public_channel_id TEXT,
+                    public_message_id TEXT,
+                    author_id TEXT NOT NULL,
+                    mercenaire_id TEXT NOT NULL,
+                    anonyme BOOLEAN DEFAULT FALSE,
+                    proposed_recompense TEXT,
+                    proposed_conditions TEXT,
+                    control_message_id TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS contrat_salon_uniq_candidature
+                ON contrat_salon (public_message_id, mercenaire_id)
+                WHERE kind IN ('candidature', 'active');
+            """)
             existing_keys = await conn.fetchval("SELECT COUNT(*) FROM license_keys")
             if existing_keys == 0:
                 import secrets as sec
@@ -495,6 +516,9 @@ class NexusBot(discord.Client):
             self.add_view(ContratCloseView())
             self.add_dynamic_items(ContratAcceptButton, ContratDoneButton, ContratCancelButton)
             self.add_dynamic_items(ContratDmCancelButton, ContratDmCloseButton)
+            self.add_dynamic_items(
+                ContratCounterOfferButton, ContratNegoAcceptButton, ContratNegoCloseButton,
+                ContratValidateButton, ContratAddPersonButton, ContratCloseChannelButton)
         except Exception as e:
             logger.error(f"Failed to register contrat views: {e}")
         try:
@@ -6798,6 +6822,118 @@ async def contrat_relay_list_by_commanditaire(commanditaire_id: int):
         return []
 
 
+async def contrat_salon_add(channel_id, guild_id, kind, author_id, mercenaire_id,
+                            *, public_channel_id=None, public_message_id=None,
+                            anonyme=False, proposed_recompense=None,
+                            proposed_conditions=None, control_message_id=None):
+    """Insère une ligne de salon de contrat. Renvoie True si l'insertion a
+    réussi, False en cas de conflit (déjà une candidature/négociation pour ce
+    couple contrat/mercenaire) ou d'erreur."""
+    if not pool:
+        return False
+    try:
+        await pool.execute(
+            "INSERT INTO contrat_salon "
+            "(channel_id, guild_id, kind, public_channel_id, public_message_id, "
+            "author_id, mercenaire_id, anonyme, proposed_recompense, "
+            "proposed_conditions, control_message_id) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) "
+            "ON CONFLICT (channel_id) DO UPDATE SET "
+            "kind = EXCLUDED.kind, "
+            "proposed_recompense = EXCLUDED.proposed_recompense, "
+            "proposed_conditions = EXCLUDED.proposed_conditions, "
+            "control_message_id = EXCLUDED.control_message_id",
+            str(channel_id), str(guild_id), kind,
+            str(public_channel_id) if public_channel_id else None,
+            str(public_message_id) if public_message_id else None,
+            str(author_id), str(mercenaire_id), bool(anonyme),
+            proposed_recompense, proposed_conditions,
+            str(control_message_id) if control_message_id else None)
+        return True
+    except asyncpg.UniqueViolationError:
+        return False
+    except Exception as e:
+        logger.error(f"contrat_salon_add error: {e}")
+        return False
+
+
+async def contrat_salon_get(channel_id):
+    if not pool:
+        return None
+    try:
+        return await pool.fetchrow(
+            "SELECT * FROM contrat_salon WHERE channel_id = $1", str(channel_id))
+    except Exception as e:
+        logger.error(f"contrat_salon_get error: {e}")
+        return None
+
+
+async def contrat_salon_remove(channel_id):
+    if not pool:
+        return
+    try:
+        await pool.execute(
+            "DELETE FROM contrat_salon WHERE channel_id = $1", str(channel_id))
+    except Exception as e:
+        logger.error(f"contrat_salon_remove error: {e}")
+
+
+async def contrat_salon_set_kind(channel_id, kind):
+    if not pool:
+        return
+    try:
+        await pool.execute(
+            "UPDATE contrat_salon SET kind = $2 WHERE channel_id = $1",
+            str(channel_id), kind)
+    except Exception as e:
+        logger.error(f"contrat_salon_set_kind error: {e}")
+
+
+async def contrat_salon_claim(channel_id):
+    """Tente de marquer une candidature comme 'active' de façon atomique.
+    Ne réussit que si la ligne est encore 'candidature'. Renvoie la ligne
+    mise à jour si gagnée, sinon None (déjà attribuée/clôturée)."""
+    if not pool:
+        return None
+    try:
+        return await pool.fetchrow(
+            "UPDATE contrat_salon SET kind = 'active' "
+            "WHERE channel_id = $1 AND kind = 'candidature' RETURNING *",
+            str(channel_id))
+    except Exception as e:
+        logger.error(f"contrat_salon_claim error: {e}")
+        return None
+
+
+async def contrat_salon_set_control(channel_id, control_message_id):
+    if not pool:
+        return
+    try:
+        await pool.execute(
+            "UPDATE contrat_salon SET control_message_id = $2 WHERE channel_id = $1",
+            str(channel_id), str(control_message_id))
+    except Exception as e:
+        logger.error(f"contrat_salon_set_control error: {e}")
+
+
+async def contrat_salon_candidatures(public_message_id, mercenaire_id=None):
+    if not pool:
+        return []
+    try:
+        if mercenaire_id is not None:
+            return await pool.fetch(
+                "SELECT * FROM contrat_salon WHERE public_message_id = $1 "
+                "AND mercenaire_id = $2 AND kind IN ('candidature','active')",
+                str(public_message_id), str(mercenaire_id))
+        return await pool.fetch(
+            "SELECT * FROM contrat_salon WHERE public_message_id = $1 "
+            "AND kind IN ('candidature','active')",
+            str(public_message_id))
+    except Exception as e:
+        logger.error(f"contrat_salon_candidatures error: {e}")
+        return []
+
+
 def build_contrat_embed(*, type_key, titre, recompense, objectif, conditions,
                         delai, commanditaire_id, statut, color, anonyme=False):
     t = CONTRAT_TYPES.get(type_key, {})
@@ -6898,6 +7034,54 @@ def _contrat_field(embed: discord.Embed, name: str):
     return None
 
 
+def _contrat_set_field(embed: discord.Embed, name: str, value: str):
+    for i, f in enumerate(embed.fields):
+        if f.name == name:
+            embed.set_field_at(i, name=name, value=value or "—", inline=f.inline)
+            return
+
+
+async def _contrat_resolve_channel(channel_id):
+    ch = bot.get_channel(int(channel_id))
+    if ch is None:
+        try:
+            ch = await bot.fetch_channel(int(channel_id))
+        except Exception:
+            ch = None
+    return ch
+
+
+async def _contrat_fetch_public_message(public_channel_id, public_message_id):
+    if not public_channel_id or not public_message_id:
+        return None
+    ch = await _contrat_resolve_channel(public_channel_id)
+    if ch is None:
+        return None
+    try:
+        return await ch.fetch_message(int(public_message_id))
+    except Exception:
+        return None
+
+
+async def _contrat_delete_salon_channel(row, *, note=None, delay=5):
+    channel_id = int(row['channel_id'])
+    ch = await _contrat_resolve_channel(channel_id)
+    if ch is not None and note:
+        try:
+            await ch.send(note)
+        except Exception:
+            pass
+    if ch is not None:
+        await asyncio.sleep(delay)
+        try:
+            await ch.delete(reason="Salon de contrat fermé")
+        except Exception as e:
+            logger.error(f"Contrat: suppression salon échouée : {e}")
+    await contrat_salon_remove(channel_id)
+    if row['anonyme']:
+        await contrat_relay_remove(channel_id)
+
+
 async def _contrat_fetch_member(guild, user_id: int):
     member = guild.get_member(user_id)
     if member is None:
@@ -6974,6 +7158,20 @@ class ContratAcceptButton(
         is_anon = _contrat_field(embed, CTF_COMMAND) == CONTRAT_ANON_LABEL
         creator = await _contrat_fetch_member(guild, self.author_id)
 
+        if member.id == self.author_id:
+            await interaction.followup.send(
+                "❌ Tu ne peux pas prendre ton propre contrat.", ephemeral=True)
+            return
+
+        existing = await contrat_salon_candidatures(interaction.message.id, member.id)
+        if existing:
+            ch = await _contrat_resolve_channel(int(existing[0]['channel_id']))
+            await interaction.followup.send(
+                "ℹ️ Tu as déjà un salon ouvert pour ce contrat"
+                + (f" : {ch.mention}" if ch else "") + ".",
+                ephemeral=True)
+            return
+
         category = guild.get_channel(CONTRAT_CATEGORY_ID)
         if not isinstance(category, discord.CategoryChannel):
             await interaction.followup.send(
@@ -6999,11 +7197,19 @@ class ContratAcceptButton(
                 ephemeral=True)
             return
 
-        _contrat_set_status(embed, f"🟠 Pris en charge par {member.mention}")
-        embed.color = discord.Color(CONTRAT_COLOR_PROGRESS)
-        embed.add_field(name="💬 Salon privé", value=private_channel.mention, inline=True)
-        await interaction.message.edit(
-            embed=embed, view=make_contrat_progress_view(self.author_id, member.id))
+        ok_add = await contrat_salon_add(
+            private_channel.id, guild.id, 'candidature', self.author_id, member.id,
+            public_channel_id=interaction.message.channel.id,
+            public_message_id=interaction.message.id,
+            anonyme=is_anon)
+        if not ok_add:
+            try:
+                await private_channel.delete(reason="Candidature en double")
+            except Exception:
+                pass
+            await interaction.followup.send(
+                "ℹ️ Tu as déjà un salon ouvert pour ce contrat.", ephemeral=True)
+            return
 
         if is_anon:
             intro_desc = (
@@ -7030,8 +7236,12 @@ class ContratAcceptButton(
             mentions = member.mention
         else:
             mentions = member.mention + (f" {creator.mention}" if creator else "")
+        private_view = make_contrat_private_view(
+            private_channel.id, self.author_id, member.id, anonyme=is_anon)
         try:
-            await private_channel.send(content=mentions, embed=intro, view=ContratCloseView())
+            sent = await private_channel.send(
+                content=mentions, embed=intro, view=private_view)
+            await contrat_salon_set_control(private_channel.id, sent.id)
         except Exception:
             pass
 
@@ -7047,7 +7257,9 @@ class ContratAcceptButton(
                 "🕵️ Ton identité reste **anonyme**. Pour discuter avec le mercenaire, "
                 "**réponds simplement à ce message privé** : je transmettrai tes messages "
                 "anonymement dans le salon du contrat, et je te renverrai ici ses réponses.\n\n"
-                "Avec les boutons ci-dessous, tu peux **annuler** ou **fermer** ce contrat à tout moment."
+                "Plusieurs mercenaires peuvent se proposer : avec les boutons ci-dessous, tu peux "
+                "**valider** ce mercenaire (les autres salons se fermeront), ou **annuler** / "
+                "**fermer** ce salon à tout moment."
             )
         else:
             dm_desc = (
@@ -7235,6 +7447,7 @@ async def _contrat_close_private_from_relay(relay, *, closed_by_label: str,
             logger.error(f"Contrat: suppression salon privé (DM) échouée : {e}")
 
     await contrat_relay_remove(channel_id)
+    await contrat_salon_remove(channel_id)
 
 
 class ContratDmCancelButton(
@@ -7307,6 +7520,7 @@ class ContratDmCloseButton(
 
 def make_contrat_dm_view(channel_id: int, commanditaire_id: int) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
+    view.add_item(ContratValidateButton(channel_id, commanditaire_id))
     view.add_item(ContratDmCancelButton(channel_id, commanditaire_id))
     view.add_item(ContratDmCloseButton(channel_id, commanditaire_id))
     return view
@@ -7315,7 +7529,19 @@ def make_contrat_dm_view(channel_id: int, commanditaire_id: int) -> discord.ui.V
 def make_contrat_open_view(author_id: int) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     view.add_item(ContratAcceptButton(author_id))
+    view.add_item(ContratCounterOfferButton(author_id))
     view.add_item(ContratCancelButton(author_id))
+    return view
+
+
+def make_contrat_private_view(channel_id: int, author_id: int, mercenaire_id: int,
+                              *, anonyme: bool = False,
+                              validated: bool = False) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    if not validated and not anonyme:
+        view.add_item(ContratValidateButton(channel_id, author_id))
+    view.add_item(ContratAddPersonButton(channel_id))
+    view.add_item(ContratCloseChannelButton(channel_id))
     return view
 
 
@@ -7374,6 +7600,559 @@ class ContratCloseView(discord.ui.View):
                     ephemeral=True)
             except Exception:
                 pass
+
+
+class ContratCounterOfferButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_offer:(?P<author>\d+)'
+):
+    def __init__(self, author_id: int):
+        self.author_id = author_id
+        super().__init__(discord.ui.Button(
+            label="Faire une contre-offre",
+            style=discord.ButtonStyle.secondary,
+            emoji="💰",
+            custom_id=f"contrat_offer:{author_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['author']))
+
+    async def callback(self, interaction: discord.Interaction):
+        member = await _resolve_member(interaction)
+        if not _has_role(member, CONTRAT_ACCEPT_ROLE_ID):
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le rôle requis pour faire une contre-offre.", ephemeral=True)
+            return
+        if not interaction.message or not interaction.message.embeds:
+            await interaction.response.send_message("❌ Contrat introuvable.", ephemeral=True)
+            return
+        if member.id == self.author_id:
+            await interaction.response.send_message(
+                "❌ Tu ne peux pas faire une contre-offre sur ton propre contrat.",
+                ephemeral=True)
+            return
+        embed = interaction.message.embeds[0]
+        is_anon = _contrat_field(embed, CTF_COMMAND) == CONTRAT_ANON_LABEL
+        titre = _contrat_field(embed, CTF_TITRE) or "Contrat"
+        cur_recomp = _contrat_field(embed, CTF_RECOMP) or ""
+        cur_cond = _contrat_field(embed, CTF_COND) or ""
+        await interaction.response.send_modal(ContratCounterOfferModal(
+            author_id=self.author_id,
+            is_anon=is_anon,
+            titre=titre,
+            public_channel_id=interaction.message.channel.id,
+            public_message_id=interaction.message.id,
+            cur_recompense="" if cur_recomp == "—" else cur_recomp,
+            cur_conditions="" if cur_cond == "—" else cur_cond,
+        ))
+
+
+class ContratCounterOfferModal(discord.ui.Modal, title="Contre-offre"):
+    recompense = discord.ui.TextInput(
+        label="Nouvelle récompense proposée", max_length=200, required=True)
+    conditions = discord.ui.TextInput(
+        label="Nouvelles conditions", style=discord.TextStyle.paragraph,
+        max_length=500, required=False)
+    message = discord.ui.TextInput(
+        label="Message au commanditaire (optionnel)",
+        style=discord.TextStyle.paragraph, max_length=500, required=False)
+
+    def __init__(self, *, author_id, is_anon, titre, public_channel_id,
+                 public_message_id, cur_recompense="", cur_conditions=""):
+        super().__init__()
+        self._author_id = author_id
+        self._is_anon = is_anon
+        self._titre = titre
+        self._public_channel_id = public_channel_id
+        self._public_message_id = public_message_id
+        self.recompense.default = cur_recompense
+        self.conditions.default = cur_conditions
+        self._cur_recompense = cur_recompense or "—"
+        self._cur_conditions = cur_conditions or "—"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        member = await _resolve_member(interaction)
+        if guild is None or member is None:
+            await interaction.followup.send(
+                "❌ Action possible uniquement sur le serveur.", ephemeral=True)
+            return
+        category = guild.get_channel(CONTRAT_CATEGORY_ID)
+        if not isinstance(category, discord.CategoryChannel):
+            await interaction.followup.send(
+                "❌ Catégorie des salons de contrat introuvable.", ephemeral=True)
+            return
+        creator = await _contrat_fetch_member(guild, self._author_id)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_channels=True,
+                read_message_history=True),
+            member: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True,
+                attach_files=True),
+        }
+        if not self._is_anon and creator:
+            overwrites[creator] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True,
+                attach_files=True)
+        cible = (self._titre or "").strip()
+        name = (f"offre-{cible}" if cible else "contre-offre")[:90]
+        try:
+            channel = await guild.create_text_channel(
+                name=name, category=category, overwrites=overwrites,
+                reason="Salon de contre-offre")
+        except Exception as e:
+            logger.error(f"Contrat: création salon contre-offre échouée : {e}")
+            await interaction.followup.send(
+                "❌ Impossible de créer le salon de négociation.", ephemeral=True)
+            return
+
+        nego_embed = discord.Embed(
+            title="💰 Contre-offre",
+            description=f"## {self._titre}",
+            color=CONTRAT_COLOR_PROGRESS,
+        )
+        nego_embed.add_field(
+            name="Récompense",
+            value=f"~~{self._cur_recompense}~~ → **{self.recompense.value}**",
+            inline=False)
+        nego_embed.add_field(
+            name="Conditions",
+            value=f"~~{self._cur_conditions}~~ → **{self.conditions.value or '—'}**",
+            inline=False)
+        nego_embed.add_field(name="Mercenaire", value=member.mention, inline=True)
+        if self.message.value:
+            nego_embed.add_field(name="Message", value=self.message.value, inline=False)
+
+        await contrat_salon_add(
+            channel.id, guild.id, 'nego', self._author_id, member.id,
+            public_channel_id=self._public_channel_id,
+            public_message_id=self._public_message_id,
+            anonyme=self._is_anon,
+            proposed_recompense=self.recompense.value,
+            proposed_conditions=self.conditions.value or "—")
+
+        if self._is_anon:
+            await contrat_relay_add(
+                channel.id, guild.id, self._author_id,
+                public_channel_id=self._public_channel_id,
+                public_message_id=self._public_message_id)
+            intro = discord.Embed(
+                title="💰 Négociation de contrat",
+                description=(
+                    f"Tu proposes une contre-offre sur **{self._titre}**.\n\n"
+                    "Le **commanditaire anonyme** a reçu ta proposition en MP. "
+                    "Discute avec lui ici : tes messages lui sont transmis anonymement, "
+                    "et ses réponses apparaîtront ici. S'il accepte, le contrat sera "
+                    "mis à jour et tu pourras le prendre.\n\n"
+                    "Le bouton ci-dessous ferme ce salon si vous ne vous entendez pas."
+                ),
+                color=CONTRAT_COLOR_PROGRESS,
+            )
+            nego_view = discord.ui.View(timeout=None)
+            nego_view.add_item(ContratNegoCloseButton(channel.id, self._author_id))
+            try:
+                await channel.send(content=member.mention, embed=intro)
+                await channel.send(embed=nego_embed, view=nego_view)
+            except Exception:
+                pass
+            dm_target = creator
+            if dm_target is None:
+                try:
+                    dm_target = await bot.fetch_user(self._author_id)
+                except Exception:
+                    dm_target = None
+            dm_embed = discord.Embed(
+                title="💰 Contre-offre reçue",
+                description=(
+                    f"**{member.display_name}** propose une contre-offre sur ton contrat "
+                    f"**{self._titre}**.\n\n"
+                    "🕵️ Ton identité reste anonyme. **Réponds à ce message** pour discuter "
+                    "avec le mercenaire. Si tu **acceptes**, le contrat sera mis à jour avec "
+                    "la nouvelle récompense et les nouvelles conditions, et ce salon se fermera."
+                ),
+                color=CONTRAT_COLOR_PROGRESS,
+            )
+            dm_view = discord.ui.View(timeout=None)
+            dm_view.add_item(ContratNegoAcceptButton(channel.id, self._author_id))
+            dm_view.add_item(ContratNegoCloseButton(channel.id, self._author_id))
+            ok = await _contrat_send_dm(dm_target, dm_embed, dm_view)
+            if ok and dm_target is not None:
+                try:
+                    await dm_target.send(embed=nego_embed)
+                except Exception:
+                    pass
+            if not ok:
+                try:
+                    await channel.send(
+                        "⚠️ Le commanditaire anonyme n'a pas pu être prévenu en MP "
+                        "(messages privés fermés ?).")
+                except Exception:
+                    pass
+        else:
+            nego_view = discord.ui.View(timeout=None)
+            nego_view.add_item(ContratNegoAcceptButton(channel.id, self._author_id))
+            nego_view.add_item(ContratNegoCloseButton(channel.id, self._author_id))
+            mentions = member.mention + (f" {creator.mention}" if creator else "")
+            try:
+                await channel.send(content=mentions, embed=nego_embed, view=nego_view)
+            except Exception:
+                pass
+
+        await interaction.followup.send(
+            f"✅ Contre-offre envoyée. Salon de négociation : {channel.mention}",
+            ephemeral=True)
+        try:
+            await log_to_db('info', f'Contre-offre par {member} dans {guild.name}')
+        except Exception:
+            pass
+
+
+class ContratNegoAcceptButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_nego_ok:(?P<channel>\d+):(?P<author>\d+)'
+):
+    def __init__(self, channel_id: int, author_id: int):
+        self.channel_id = channel_id
+        self.author_id = author_id
+        super().__init__(discord.ui.Button(
+            label="Accepter la contre-offre",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            custom_id=f"contrat_nego_ok:{channel_id}:{author_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['channel']), int(match['author']))
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Seul le commanditaire peut accepter la contre-offre.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        row = await contrat_salon_get(self.channel_id)
+        if not row or row['kind'] != 'nego':
+            await interaction.followup.send(
+                "ℹ️ Cette négociation est déjà clôturée.", ephemeral=True)
+            return
+        pub_msg = await _contrat_fetch_public_message(
+            row['public_channel_id'], row['public_message_id'])
+        if pub_msg and pub_msg.embeds:
+            pub_embed = pub_msg.embeds[0]
+            _contrat_set_field(pub_embed, CTF_RECOMP, row['proposed_recompense'] or "—")
+            _contrat_set_field(pub_embed, CTF_COND, row['proposed_conditions'] or "—")
+            try:
+                await pub_msg.edit(embed=pub_embed)
+            except Exception as e:
+                logger.error(f"Contrat: maj contrat après contre-offre échouée : {e}")
+        await interaction.followup.send(
+            "✅ Contre-offre acceptée : le contrat a été mis à jour.", ephemeral=True)
+        await _contrat_delete_salon_channel(
+            row,
+            note=("✅ Le commanditaire a **accepté** la contre-offre ! Le contrat a été "
+                  "mis à jour avec la nouvelle récompense et les nouvelles conditions. "
+                  "Tu peux maintenant le **prendre** depuis l'annonce. Ce salon sera "
+                  "supprimé dans 5 secondes."))
+        try:
+            await log_to_db('info', f'Contre-offre acceptée par {interaction.user}')
+        except Exception:
+            pass
+
+
+class ContratNegoCloseButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_nego_no:(?P<channel>\d+):(?P<author>\d+)'
+):
+    def __init__(self, channel_id: int, author_id: int):
+        self.channel_id = channel_id
+        self.author_id = author_id
+        super().__init__(discord.ui.Button(
+            label="Fermer / Refuser",
+            style=discord.ButtonStyle.danger,
+            emoji="✖️",
+            custom_id=f"contrat_nego_no:{channel_id}:{author_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['channel']), int(match['author']))
+
+    async def callback(self, interaction: discord.Interaction):
+        row = await contrat_salon_get(self.channel_id)
+        member = await _resolve_member(interaction)
+        mp = getattr(member, 'guild_permissions', None)
+        allowed = (
+            interaction.user.id == self.author_id
+            or (row and interaction.user.id == int(row['mercenaire_id']))
+            or (mp is not None and mp.manage_channels)
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le droit de fermer cette négociation.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        if not row or row['kind'] != 'nego':
+            await interaction.followup.send(
+                "ℹ️ Cette négociation est déjà clôturée.", ephemeral=True)
+            return
+        await interaction.followup.send("✖️ Négociation fermée.", ephemeral=True)
+        await _contrat_delete_salon_channel(
+            row,
+            note=("✖️ La négociation a été **fermée**. Le contrat reste inchangé. "
+                  "Ce salon sera supprimé dans 5 secondes."))
+        try:
+            await log_to_db('info', f'Contre-offre refusée/fermée par {interaction.user}')
+        except Exception:
+            pass
+
+
+class ContratValidateButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_valid:(?P<channel>\d+):(?P<author>\d+)'
+):
+    def __init__(self, channel_id: int, author_id: int):
+        self.channel_id = channel_id
+        self.author_id = author_id
+        super().__init__(discord.ui.Button(
+            label="Valider ce mercenaire",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            custom_id=f"contrat_valid:{channel_id}:{author_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['channel']), int(match['author']))
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Seul le commanditaire peut valider un mercenaire.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        row = await contrat_salon_claim(self.channel_id)
+        if not row:
+            await interaction.followup.send(
+                "ℹ️ Ce contrat a déjà été attribué ou ce salon est clôturé.", ephemeral=True)
+            return
+        mercenaire_id = int(row['mercenaire_id'])
+        guild = interaction.guild
+        if guild is None and row['guild_id']:
+            guild = bot.get_guild(int(row['guild_id']))
+        merc_member = None
+        if guild is not None:
+            merc_member = await _contrat_fetch_member(guild, mercenaire_id)
+        merc_mention = merc_member.mention if merc_member else f"<@{mercenaire_id}>"
+
+        pub_msg = await _contrat_fetch_public_message(
+            row['public_channel_id'], row['public_message_id'])
+        if pub_msg and pub_msg.embeds:
+            pub_embed = pub_msg.embeds[0]
+            _contrat_set_status(pub_embed, f"🟠 En cours — {merc_mention}")
+            pub_embed.color = discord.Color(CONTRAT_COLOR_PROGRESS)
+            try:
+                await pub_msg.edit(
+                    embed=pub_embed,
+                    view=make_contrat_progress_view(self.author_id, mercenaire_id))
+            except Exception as e:
+                logger.error(f"Contrat: maj annonce après validation échouée : {e}")
+
+        siblings = await contrat_salon_candidatures(row['public_message_id'])
+        for sib in siblings:
+            if int(sib['channel_id']) == int(self.channel_id):
+                continue
+            if sib['kind'] != 'candidature':
+                continue
+            await _contrat_delete_salon_channel(
+                sib,
+                note=("ℹ️ Le commanditaire a choisi un autre mercenaire pour ce contrat. "
+                      "Ce salon sera supprimé dans 5 secondes."))
+
+        await self._refresh_control(row, mercenaire_id)
+
+        ch = await _contrat_resolve_channel(self.channel_id)
+        if ch is not None:
+            try:
+                await ch.send(
+                    f"✅ {merc_mention} a été **validé** par le commanditaire pour ce contrat !")
+            except Exception:
+                pass
+        await interaction.followup.send(
+            f"✅ {merc_mention} a été validé. Les autres salons ont été fermés.",
+            ephemeral=True)
+        try:
+            await log_to_db('info', f'Mercenaire validé sur contrat par {interaction.user}')
+        except Exception:
+            pass
+
+    async def _refresh_control(self, row, mercenaire_id):
+        if not row['control_message_id']:
+            return
+        ch = await _contrat_resolve_channel(self.channel_id)
+        if ch is None:
+            return
+        try:
+            msg = await ch.fetch_message(int(row['control_message_id']))
+        except Exception:
+            return
+        new_view = make_contrat_private_view(
+            self.channel_id, self.author_id, mercenaire_id,
+            anonyme=row['anonyme'], validated=True)
+        try:
+            await msg.edit(view=new_view)
+        except Exception:
+            pass
+
+
+class ContratAddPersonButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_addp:(?P<channel>\d+)'
+):
+    def __init__(self, channel_id: int):
+        self.channel_id = channel_id
+        super().__init__(discord.ui.Button(
+            label="Ajouter une personne",
+            style=discord.ButtonStyle.secondary,
+            emoji="➕",
+            custom_id=f"contrat_addp:{channel_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['channel']))
+
+    async def callback(self, interaction: discord.Interaction):
+        member = await _resolve_member(interaction)
+        mp = getattr(member, 'guild_permissions', None)
+        allowed = (
+            _has_role(member, CONTRAT_ACCEPT_ROLE_ID)
+            or _has_any_role(member, CONTRAT_CREATOR_ROLE_IDS)
+            or (mp is not None and mp.manage_channels)
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le droit d'ajouter une personne à ce salon.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ContratAddPersonModal())
+
+
+class ContratAddPersonModal(discord.ui.Modal, title="Ajouter une personne"):
+    user_id = discord.ui.TextInput(
+        label="ID Discord de la personne",
+        placeholder="Ex : 123456789012345678",
+        max_length=30, required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        channel = interaction.channel
+        if guild is None or channel is None:
+            await interaction.followup.send(
+                "❌ Action possible uniquement dans le salon du contrat.", ephemeral=True)
+            return
+        raw = (self.user_id.value or "").strip().strip("<@!>").strip()
+        if not raw.isdigit():
+            await interaction.followup.send(
+                "❌ ID Discord invalide. Donne uniquement l'identifiant numérique.",
+                ephemeral=True)
+            return
+        target = await _contrat_fetch_member(guild, int(raw))
+        if target is None:
+            await interaction.followup.send(
+                "❌ Aucun membre trouvé avec cet ID sur le serveur.", ephemeral=True)
+            return
+        try:
+            await channel.set_permissions(
+                target,
+                view_channel=True, send_messages=True,
+                read_message_history=True, attach_files=True,
+                reason=f"Ajout au salon de contrat par {interaction.user}")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Je n'ai pas la permission de modifier ce salon.", ephemeral=True)
+            return
+        except Exception as e:
+            logger.error(f"Contrat: ajout personne échoué : {e}")
+            await interaction.followup.send(
+                "❌ Impossible d'ajouter cette personne.", ephemeral=True)
+            return
+        try:
+            await channel.send(
+                f"➕ {target.mention} a été ajouté au salon par {interaction.user.mention}.")
+        except Exception:
+            pass
+        await interaction.followup.send(
+            f"✅ {target.mention} a été ajouté au salon.", ephemeral=True)
+
+
+class ContratCloseChannelButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_closec:(?P<channel>\d+)'
+):
+    def __init__(self, channel_id: int):
+        self.channel_id = channel_id
+        super().__init__(discord.ui.Button(
+            label="Fermer le salon",
+            style=discord.ButtonStyle.danger,
+            emoji="🔒",
+            custom_id=f"contrat_closec:{channel_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['channel']))
+
+    async def callback(self, interaction: discord.Interaction):
+        member = await _resolve_member(interaction)
+        mp = getattr(member, 'guild_permissions', None)
+        allowed = (
+            _has_role(member, CONTRAT_ACCEPT_ROLE_ID)
+            or _has_any_role(member, CONTRAT_CREATOR_ROLE_IDS)
+            or (mp is not None and mp.manage_channels)
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                "❌ Tu n'as pas le droit de fermer ce salon.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"🔒 Salon fermé par {interaction.user.mention}. Suppression dans 5 secondes…")
+        relay = await contrat_relay_get_by_channel(self.channel_id)
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(
+                reason=f"Salon de contrat fermé par {interaction.user}")
+        except Exception as e:
+            logger.error(f"Contrat: échec suppression salon privé : {e}\n{traceback.format_exc()}")
+            try:
+                await interaction.followup.send(
+                    "❌ Impossible de supprimer le salon (permission manquante ?).",
+                    ephemeral=True)
+            except Exception:
+                pass
+            return
+        await contrat_salon_remove(self.channel_id)
+        if relay:
+            await contrat_relay_remove(self.channel_id)
+            target = bot.get_user(int(relay['commanditaire_id']))
+            if target is None:
+                try:
+                    target = await bot.fetch_user(int(relay['commanditaire_id']))
+                except Exception:
+                    target = None
+            if target is not None:
+                try:
+                    await target.send(
+                        "🔒 Le salon de ton contrat anonyme a été fermé. "
+                        "Le relais est désormais terminé.")
+                except Exception:
+                    pass
 
 
 class ContratPanelView(discord.ui.View):
