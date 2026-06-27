@@ -263,9 +263,15 @@ async def init_db():
                     channel_id TEXT PRIMARY KEY,
                     guild_id TEXT NOT NULL,
                     commanditaire_id TEXT NOT NULL,
+                    public_channel_id TEXT,
+                    public_message_id TEXT,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
             """)
+            await conn.execute(
+                "ALTER TABLE contrat_anon_relay ADD COLUMN IF NOT EXISTS public_channel_id TEXT")
+            await conn.execute(
+                "ALTER TABLE contrat_anon_relay ADD COLUMN IF NOT EXISTS public_message_id TEXT")
             existing_keys = await conn.fetchval("SELECT COUNT(*) FROM license_keys")
             if existing_keys == 0:
                 import secrets as sec
@@ -488,6 +494,7 @@ class NexusBot(discord.Client):
             self.add_view(ContratPanelView())
             self.add_view(ContratCloseView())
             self.add_dynamic_items(ContratAcceptButton, ContratDoneButton, ContratCancelButton)
+            self.add_dynamic_items(ContratDmCancelButton, ContratDmCloseButton)
         except Exception as e:
             logger.error(f"Failed to register contrat views: {e}")
         try:
@@ -4631,11 +4638,15 @@ async def gerants_command(interaction: discord.Interaction):
 
         container.add_item(discord.ui.TextDisplay(
             "## AURORS\n"
-            "> <@380059243451121664> et <@565773187116302346> & <@484798244996644864>"
+            "> <@1413486076332605481> et <@565773187116302346>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MANGEMORT\n"
-            "> <@879458572986105887> et <@1045815146511081542> & <@407215406961524746>"
+            "> <@1413486076332605481> et <@484798244996644864> & <@1045815146511081542>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
+            "## VAMPIRE\n"
+            "> <@879458572986105887>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MINISTERE\n"
@@ -4643,7 +4654,11 @@ async def gerants_command(interaction: discord.Interaction):
         ))
         container.add_item(discord.ui.TextDisplay(
             "## MAGE-INDEPENDANT\n"
-            "> <@1413486076332605481> et <@665228481654947853>"
+            "> <@665228481654947853>"
+        ))
+        container.add_item(discord.ui.TextDisplay(
+            "## ORDRE DU PHENIX\n"
+            "> <@380059243451121664>"
         ))
         container.add_item(discord.ui.TextDisplay(
             "## PROFESSEUR\n"
@@ -6729,15 +6744,21 @@ def _format_missive(content: str) -> str:
     return "\n".join(f"> {line}" if line.strip() else ">" for line in lines)
 
 
-async def contrat_relay_add(channel_id: int, guild_id: int, commanditaire_id: int):
+async def contrat_relay_add(channel_id: int, guild_id: int, commanditaire_id: int,
+                            public_channel_id: int = None, public_message_id: int = None):
     if not pool:
         return
     try:
         await pool.execute(
-            "INSERT INTO contrat_anon_relay (channel_id, guild_id, commanditaire_id) "
-            "VALUES ($1, $2, $3) ON CONFLICT (channel_id) DO UPDATE "
-            "SET commanditaire_id = EXCLUDED.commanditaire_id",
-            str(channel_id), str(guild_id), str(commanditaire_id))
+            "INSERT INTO contrat_anon_relay "
+            "(channel_id, guild_id, commanditaire_id, public_channel_id, public_message_id) "
+            "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (channel_id) DO UPDATE "
+            "SET commanditaire_id = EXCLUDED.commanditaire_id, "
+            "public_channel_id = EXCLUDED.public_channel_id, "
+            "public_message_id = EXCLUDED.public_message_id",
+            str(channel_id), str(guild_id), str(commanditaire_id),
+            str(public_channel_id) if public_channel_id else None,
+            str(public_message_id) if public_message_id else None)
     except Exception as e:
         logger.error(f"contrat_relay_add error: {e}")
 
@@ -6757,8 +6778,8 @@ async def contrat_relay_get_by_channel(channel_id: int):
         return None
     try:
         return await pool.fetchrow(
-            "SELECT channel_id, guild_id, commanditaire_id FROM contrat_anon_relay "
-            "WHERE channel_id = $1", str(channel_id))
+            "SELECT channel_id, guild_id, commanditaire_id, public_channel_id, public_message_id "
+            "FROM contrat_anon_relay WHERE channel_id = $1", str(channel_id))
     except Exception as e:
         logger.error(f"contrat_relay_get_by_channel error: {e}")
         return None
@@ -6769,8 +6790,8 @@ async def contrat_relay_list_by_commanditaire(commanditaire_id: int):
         return []
     try:
         return await pool.fetch(
-            "SELECT channel_id, guild_id, commanditaire_id FROM contrat_anon_relay "
-            "WHERE commanditaire_id = $1 ORDER BY created_at DESC",
+            "SELECT channel_id, guild_id, commanditaire_id, public_channel_id, public_message_id "
+            "FROM contrat_anon_relay WHERE commanditaire_id = $1 ORDER BY created_at DESC",
             str(commanditaire_id))
     except Exception as e:
         logger.error(f"contrat_relay_list_by_commanditaire error: {e}")
@@ -6887,11 +6908,14 @@ async def _contrat_fetch_member(guild, user_id: int):
     return member
 
 
-async def _contrat_send_dm(user, embed: discord.Embed):
+async def _contrat_send_dm(user, embed: discord.Embed, view: discord.ui.View = None):
     if user is None:
         return False
     try:
-        await user.send(embed=embed)
+        if view is not None:
+            await user.send(embed=embed, view=view)
+        else:
+            await user.send(embed=embed)
         return True
     except Exception:
         return False
@@ -7012,14 +7036,18 @@ class ContratAcceptButton(
             pass
 
         if is_anon:
-            await contrat_relay_add(private_channel.id, guild.id, self.author_id)
+            await contrat_relay_add(
+                private_channel.id, guild.id, self.author_id,
+                public_channel_id=interaction.message.channel.id,
+                public_message_id=interaction.message.id)
 
         if is_anon:
             dm_desc = (
                 f"**{member.display_name}** vient de prendre en charge ton contrat **{titre}**.\n\n"
                 "🕵️ Ton identité reste **anonyme**. Pour discuter avec le mercenaire, "
                 "**réponds simplement à ce message privé** : je transmettrai tes messages "
-                "anonymement dans le salon du contrat, et je te renverrai ici ses réponses."
+                "anonymement dans le salon du contrat, et je te renverrai ici ses réponses.\n\n"
+                "Avec les boutons ci-dessous, tu peux **annuler** ou **fermer** ce contrat à tout moment."
             )
         else:
             dm_desc = (
@@ -7037,7 +7065,8 @@ class ContratAcceptButton(
                 dm_target = await bot.fetch_user(self.author_id)
             except Exception:
                 dm_target = None
-        dm_ok = await _contrat_send_dm(dm_target, dm_embed)
+        dm_view = make_contrat_dm_view(private_channel.id, self.author_id) if is_anon else None
+        dm_ok = await _contrat_send_dm(dm_target, dm_embed, dm_view)
         if not dm_ok:
             if is_anon:
                 warn = (
@@ -7161,6 +7190,128 @@ class ContratCancelButton(
             pass
 
 
+async def _contrat_close_private_from_relay(relay, *, closed_by_label: str,
+                                            cancel: bool = False):
+    """Ferme (et supprime) le salon privé d'un contrat anonyme à partir de sa
+    ligne de relais. Si cancel=True, marque aussi le contrat public comme annulé.
+    Renvoie un message de statut à afficher au commanditaire."""
+    channel_id = int(relay['channel_id'])
+    private = bot.get_channel(channel_id)
+    if private is None:
+        try:
+            private = await bot.fetch_channel(channel_id)
+        except Exception:
+            private = None
+
+    if cancel and relay['public_channel_id'] and relay['public_message_id']:
+        try:
+            pub_channel = bot.get_channel(int(relay['public_channel_id']))
+            if pub_channel is None:
+                pub_channel = await bot.fetch_channel(int(relay['public_channel_id']))
+            if pub_channel is not None:
+                pub_msg = await pub_channel.fetch_message(int(relay['public_message_id']))
+                if pub_msg and pub_msg.embeds:
+                    pub_embed = pub_msg.embeds[0]
+                    _contrat_set_status(pub_embed, f"🚫 Annulé par {closed_by_label}")
+                    pub_embed.color = discord.Color(CONTRAT_COLOR_CANCEL)
+                    await pub_msg.edit(embed=pub_embed, view=None)
+        except Exception as e:
+            logger.error(f"Contrat: maj message public échouée : {e}")
+
+    if private is not None:
+        try:
+            note = ("🚫 Ce contrat a été **annulé** par le commanditaire. "
+                    "Le salon sera supprimé dans 5 secondes."
+                    if cancel else
+                    "🔒 Le commanditaire a **fermé** ce contrat. "
+                    "Le salon sera supprimé dans 5 secondes.")
+            await private.send(note)
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+        try:
+            await private.delete(reason=f"Contrat fermé par le commanditaire ({closed_by_label})")
+        except Exception as e:
+            logger.error(f"Contrat: suppression salon privé (DM) échouée : {e}")
+
+    await contrat_relay_remove(channel_id)
+
+
+class ContratDmCancelButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_dm_cancel:(?P<channel>\d+):(?P<command>\d+)'
+):
+    def __init__(self, channel_id: int, commanditaire_id: int):
+        self.channel_id = channel_id
+        self.commanditaire_id = commanditaire_id
+        super().__init__(discord.ui.Button(
+            label="Annuler le contrat",
+            style=discord.ButtonStyle.danger,
+            emoji="✖️",
+            custom_id=f"contrat_dm_cancel:{channel_id}:{commanditaire_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['channel']), int(match['command']))
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.commanditaire_id:
+            await interaction.response.send_message(
+                "❌ Seul le commanditaire peut gérer ce contrat.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        relay = await contrat_relay_get_by_channel(self.channel_id)
+        if not relay:
+            await interaction.followup.send(
+                "ℹ️ Ce contrat est déjà clôturé.", ephemeral=True)
+            return
+        await interaction.followup.send("🚫 Contrat **annulé**.", ephemeral=True)
+        await _contrat_close_private_from_relay(
+            relay, closed_by_label="le commanditaire", cancel=True)
+
+
+class ContratDmCloseButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_dm_close:(?P<channel>\d+):(?P<command>\d+)'
+):
+    def __init__(self, channel_id: int, commanditaire_id: int):
+        self.channel_id = channel_id
+        self.commanditaire_id = commanditaire_id
+        super().__init__(discord.ui.Button(
+            label="Fermer le salon",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔒",
+            custom_id=f"contrat_dm_close:{channel_id}:{commanditaire_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(int(match['channel']), int(match['command']))
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.commanditaire_id:
+            await interaction.response.send_message(
+                "❌ Seul le commanditaire peut gérer ce contrat.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        relay = await contrat_relay_get_by_channel(self.channel_id)
+        if not relay:
+            await interaction.followup.send(
+                "ℹ️ Ce salon est déjà fermé.", ephemeral=True)
+            return
+        await interaction.followup.send("🔒 Salon **fermé**.", ephemeral=True)
+        await _contrat_close_private_from_relay(
+            relay, closed_by_label="le commanditaire", cancel=False)
+
+
+def make_contrat_dm_view(channel_id: int, commanditaire_id: int) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ContratDmCancelButton(channel_id, commanditaire_id))
+    view.add_item(ContratDmCloseButton(channel_id, commanditaire_id))
+    return view
+
+
 def make_contrat_open_view(author_id: int) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     view.add_item(ContratAcceptButton(author_id))
@@ -7275,10 +7426,10 @@ async def contratbook_command(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📕 Livre de Contrats",
         description=(
-            "Bienvenue dans le **livre de contrats** du monde magique.\n\n"
-            "🗡️ **Mercenariat** - propose une mission rémunérée (cible, récompense, délai).\n"
-            "⭐ **Contrat spécial** - pour les contrats hors du commun.\n\n"
-            "🕵️ **Versions anonymes** - l'auteur du contrat reste anonyme ; les deux personnes discuteront par missive anonyme.\n\n"
+            "Bienvenue dans le **livre de contrats** de la faction.\n\n"
+            "🗡️ **Mercenariat** — propose une mission rémunérée (cible, récompense, délai).\n"
+            "⭐ **Contrat spécial** — pour les contrats hors du commun.\n\n"
+            "🕵️ **Versions anonymes** — l'auteur du contrat reste anonyme ; les deux personnes discuteront par missive anonyme.\n\n"
             "Choisis ci-dessous le type de contrat à publier."
         ),
         color=CONTRAT_COLOR_OPEN,
