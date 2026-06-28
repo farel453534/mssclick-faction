@@ -1759,6 +1759,22 @@ class NexusBot(discord.Client):
                     await channel.send(embed=relay_embed)
                     await message.channel.send(
                         "✅ Message transmis **anonymement** dans le salon du contrat.")
+                    try:
+                        dm_log = discord.Embed(
+                            title="📥 MP reçu — commanditaire anonyme → salon",
+                            description=content[:2048],
+                            color=CONTRAT_MISSIVE_COLOR,
+                            timestamp=datetime.datetime.utcnow())
+                        dm_log.add_field(
+                            name="Commanditaire (réel)",
+                            value=f"{message.author.mention} (`{message.author}` — `{message.author.id}`)",
+                            inline=False)
+                        dm_log.add_field(name="Salon", value=channel.mention, inline=False)
+                        await _contrat_log(
+                            dm_log, getattr(channel, 'guild', None),
+                            channel_id=CONTRAT_DM_LOG_CHANNEL_ID)
+                    except Exception:
+                        pass
                 except Exception:
                     try:
                         await message.channel.send(
@@ -1798,6 +1814,24 @@ class NexusBot(discord.Client):
                                 if len(self._contrat_dm_routes) > 2000:
                                     for k in list(self._contrat_dm_routes)[:1000]:
                                         self._contrat_dm_routes.pop(k, None)
+                                dm_log = discord.Embed(
+                                    title="📤 MP envoyé — mercenaire → commanditaire anonyme",
+                                    description=content[:2048],
+                                    color=CONTRAT_MISSIVE_COLOR,
+                                    timestamp=datetime.datetime.utcnow())
+                                dm_log.add_field(
+                                    name="Mercenaire",
+                                    value=f"{message.author.mention} (`{message.author}` — `{message.author.id}`)",
+                                    inline=False)
+                                dm_log.add_field(
+                                    name="Commanditaire (réel)",
+                                    value=f"<@{commanditaire_id}> (`{commanditaire_id}`)",
+                                    inline=False)
+                                dm_log.add_field(
+                                    name="Salon", value=message.channel.mention, inline=False)
+                                await _contrat_log(
+                                    dm_log, message.guild,
+                                    channel_id=CONTRAT_DM_LOG_CHANNEL_ID)
                             except Exception:
                                 pass
                 return
@@ -6754,6 +6788,9 @@ CONTRAT_PUBLISH_CHANNEL_ID = 1519461397598048367
 # Salon de logs des contrats (révèle les commanditaires anonymes au staff)
 CONTRAT_LOG_CHANNEL_ID = 1520578035806375956
 
+# Salon de logs des MP relayés des contrats anonymes (conversation commanditaire ↔ mercenaire)
+CONTRAT_DM_LOG_CHANNEL_ID = 1520582028683378769
+
 # Catégorie où sont créés les salons privés commanditaire/mercenaire
 CONTRAT_CATEGORY_ID = 1519459783042924555
 
@@ -7021,18 +7058,31 @@ async def contrat_ajout_remove(req_id):
         logger.error(f"contrat_ajout_remove error: {e}")
 
 
-async def _contrat_log(embed: discord.Embed, guild=None):
-    """Envoie un embed dans le salon de logs des contrats. Révèle notamment
+async def _contrat_log(embed: discord.Embed, guild=None, channel_id=CONTRAT_LOG_CHANNEL_ID):
+    """Envoie un embed dans un salon de logs des contrats. Révèle notamment
     l'identité réelle des commanditaires anonymes (réservé au staff)."""
     try:
         if guild is not None:
-            channel = guild.get_channel(CONTRAT_LOG_CHANNEL_ID)
+            channel = guild.get_channel(channel_id)
         else:
-            channel = await _contrat_resolve_channel(CONTRAT_LOG_CHANNEL_ID)
+            channel = await _contrat_resolve_channel(channel_id)
         if channel is not None:
             await channel.send(embed=embed)
     except Exception as e:
         logger.error(f"Contrat: log échoué : {e}")
+
+
+async def _contrat_log_event(guild, title, color, fields):
+    """Construit et envoie un embed de log de contrat. `fields` = liste de
+    tuples (nom, valeur, inline)."""
+    try:
+        embed = discord.Embed(
+            title=title, color=color, timestamp=datetime.datetime.utcnow())
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+        await _contrat_log(embed, guild)
+    except Exception as e:
+        logger.error(f"Contrat: log event échoué : {e}")
 
 
 def build_contrat_embed(*, type_key, titre, recompense, objectif, conditions,
@@ -7503,6 +7553,16 @@ class ContratDoneButton(
             await log_to_db('info', f'Contrat terminé par {member} dans {interaction.guild.name}')
         except Exception:
             pass
+        is_anon = _contrat_field(embed, CTF_COMMAND) == CONTRAT_ANON_LABEL
+        await _contrat_log_event(
+            guild, "🏁 Contrat terminé", CONTRAT_COLOR_DONE, [
+                ("Titre", titre, False),
+                ("Commanditaire (réel)",
+                 f"<@{self.author_id}> (`{self.author_id}`)"
+                 + (" — 🕵️ anonyme" if is_anon else ""), False),
+                ("Marqué terminé par",
+                 f"{member.mention} (`{member}` — `{member.id}`)", False),
+            ])
 
 
 class ContratCancelButton(
@@ -7539,6 +7599,8 @@ class ContratCancelButton(
         await interaction.response.defer()
         member = interaction.user
         embed = interaction.message.embeds[0]
+        titre = _contrat_field(embed, CTF_TITRE) or "Contrat"
+        is_anon = _contrat_field(embed, CTF_COMMAND) == CONTRAT_ANON_LABEL
         _contrat_set_status(embed, f"🚫 Annulé par {member.mention}")
         embed.color = discord.Color(CONTRAT_COLOR_CANCEL)
         await interaction.message.edit(embed=embed, view=None)
@@ -7546,6 +7608,13 @@ class ContratCancelButton(
             await log_to_db('info', f'Contrat annulé par {member} dans {interaction.guild.name}')
         except Exception:
             pass
+        await _contrat_log_event(
+            interaction.guild, "🚫 Contrat annulé", CONTRAT_COLOR_CANCEL, [
+                ("Titre", titre, False),
+                ("Commanditaire (réel)",
+                 f"{member.mention} (`{member}` — `{member.id}`)"
+                 + (" — 🕵️ anonyme" if is_anon else ""), False),
+            ])
 
 
 async def _contrat_close_private_from_relay(relay, *, closed_by_label: str,
@@ -7628,6 +7697,13 @@ class ContratDmCancelButton(
         await interaction.followup.send("🚫 Contrat **annulé**.", ephemeral=True)
         await _contrat_close_private_from_relay(
             relay, closed_by_label="le commanditaire", cancel=True)
+        await _contrat_log_event(
+            bot.get_guild(int(relay['guild_id'])),
+            "🚫 Contrat annulé (via MP)", CONTRAT_COLOR_CANCEL, [
+                ("Commanditaire (réel)",
+                 f"<@{self.commanditaire_id}> (`{self.commanditaire_id}`) — 🕵️ anonyme",
+                 False),
+            ])
 
 
 class ContratDmCloseButton(
@@ -7662,6 +7738,13 @@ class ContratDmCloseButton(
         await interaction.followup.send("🔒 Salon **fermé**.", ephemeral=True)
         await _contrat_close_private_from_relay(
             relay, closed_by_label="le commanditaire", cancel=False)
+        await _contrat_log_event(
+            bot.get_guild(int(relay['guild_id'])),
+            "🔒 Salon de contrat fermé (via MP)", CONTRAT_COLOR_CANCEL, [
+                ("Commanditaire (réel)",
+                 f"<@{self.commanditaire_id}> (`{self.commanditaire_id}`) — 🕵️ anonyme",
+                 False),
+            ])
 
 
 def make_contrat_dm_view(channel_id: int, commanditaire_id: int) -> discord.ui.View:
@@ -7718,11 +7801,25 @@ class ContratCloseView(discord.ui.View):
         await interaction.response.send_message(
             f"🔒 Salon fermé par {interaction.user.mention}. Suppression dans 5 secondes…")
         relay = await contrat_relay_get_by_channel(interaction.channel.id)
+        salon = await contrat_salon_get(interaction.channel.id)
+        log_guild = interaction.guild
         await asyncio.sleep(5)
         channel_id = interaction.channel.id
         try:
             await interaction.channel.delete(
                 reason=f"Salon de contrat fermé par {interaction.user}")
+            await contrat_salon_remove(channel_id)
+            fields = [("Fermé par",
+                       f"{interaction.user.mention} (`{interaction.user}` — `{interaction.user.id}`)",
+                       False)]
+            if salon:
+                fields.append((
+                    "Commanditaire (réel)",
+                    f"<@{salon['author_id']}> (`{salon['author_id']}`)"
+                    + (" — 🕵️ anonyme" if salon['anonyme'] else ""), False))
+                fields.append(("Mercenaire", f"<@{salon['mercenaire_id']}>", False))
+            await _contrat_log_event(
+                log_guild, "🔒 Salon de contrat fermé", CONTRAT_COLOR_CANCEL, fields)
             if relay:
                 await contrat_relay_remove(channel_id)
                 target = bot.get_user(int(relay['commanditaire_id']))
@@ -7957,6 +8054,17 @@ class ContratCounterOfferModal(discord.ui.Modal, title="Contre-offre"):
             await log_to_db('info', f'Contre-offre par {member} dans {guild.name}')
         except Exception:
             pass
+        await _contrat_log_event(
+            guild, "💰 Contre-offre proposée", CONTRAT_COLOR_PROGRESS, [
+                ("Titre", self._titre, False),
+                ("Commanditaire (réel)",
+                 f"<@{self._author_id}> (`{self._author_id}`)"
+                 + (" — 🕵️ anonyme" if self._is_anon else ""), False),
+                ("Mercenaire",
+                 f"{member.mention} (`{member}` — `{member.id}`)", False),
+                ("Nouvelle récompense", self.recompense.value or "—", True),
+                ("Salon", channel.mention, True),
+            ])
 
 
 class ContratNegoAcceptButton(
@@ -8047,6 +8155,15 @@ class ContratNegoAcceptButton(
             await log_to_db('info', f'Contre-offre acceptée par {interaction.user}')
         except Exception:
             pass
+        await _contrat_log_event(
+            guild, "💰 Contre-offre acceptée", CONTRAT_COLOR_PROGRESS, [
+                ("Titre", titre, False),
+                ("Commanditaire (réel)",
+                 f"<@{self.author_id}> (`{self.author_id}`)"
+                 + (" — 🕵️ anonyme" if is_anon else ""), False),
+                ("Mercenaire", f"<@{mercenaire_id}> (`{mercenaire_id}`)", False),
+                ("Nouvelle récompense", row['proposed_recompense'] or "—", True),
+            ])
 
 
 class ContratNegoCloseButton(
@@ -8094,6 +8211,15 @@ class ContratNegoCloseButton(
             await log_to_db('info', f'Contre-offre refusée/fermée par {interaction.user}')
         except Exception:
             pass
+        log_guild = interaction.guild or bot.get_guild(int(row['guild_id']))
+        await _contrat_log_event(
+            log_guild, "✖️ Contre-offre refusée / fermée", CONTRAT_COLOR_CANCEL, [
+                ("Commanditaire (réel)",
+                 f"<@{self.author_id}> (`{self.author_id}`)"
+                 + (" — 🕵️ anonyme" if row['anonyme'] else ""), False),
+                ("Mercenaire", f"<@{row['mercenaire_id']}>", False),
+                ("Fermé par", f"{interaction.user.mention} (`{interaction.user.id}`)", False),
+            ])
 
 
 class ContratValidateButton(
@@ -8174,6 +8300,14 @@ class ContratValidateButton(
             await log_to_db('info', f'Mercenaire validé sur contrat par {interaction.user}')
         except Exception:
             pass
+        await _contrat_log_event(
+            guild, "✅ Mercenaire validé", CONTRAT_COLOR_PROGRESS, [
+                ("Commanditaire (réel)",
+                 f"<@{self.author_id}> (`{self.author_id}`)"
+                 + (" — 🕵️ anonyme" if row['anonyme'] else ""), False),
+                ("Mercenaire retenu",
+                 f"{merc_mention} (`{mercenaire_id}`)", False),
+            ])
 
     async def _refresh_control(self, row, mercenaire_id):
         if not row['control_message_id']:
@@ -8542,6 +8676,8 @@ class ContratCloseChannelButton(
         await interaction.response.send_message(
             f"🔒 Salon fermé par {interaction.user.mention}. Suppression dans 5 secondes…")
         relay = await contrat_relay_get_by_channel(self.channel_id)
+        salon = await contrat_salon_get(self.channel_id)
+        log_guild = interaction.guild
         await asyncio.sleep(5)
         try:
             await interaction.channel.delete(
@@ -8556,6 +8692,17 @@ class ContratCloseChannelButton(
                 pass
             return
         await contrat_salon_remove(self.channel_id)
+        fields = [("Fermé par",
+                   f"{interaction.user.mention} (`{interaction.user}` — `{interaction.user.id}`)",
+                   False)]
+        if salon:
+            fields.append((
+                "Commanditaire (réel)",
+                f"<@{salon['author_id']}> (`{salon['author_id']}`)"
+                + (" — 🕵️ anonyme" if salon['anonyme'] else ""), False))
+            fields.append(("Mercenaire", f"<@{salon['mercenaire_id']}>", False))
+        await _contrat_log_event(
+            log_guild, "🔒 Salon de contrat fermé", CONTRAT_COLOR_CANCEL, fields)
         if relay:
             await contrat_relay_remove(self.channel_id)
             target = bot.get_user(int(relay['commanditaire_id']))
