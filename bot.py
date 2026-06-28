@@ -485,18 +485,31 @@ class NexusCommandTree(app_commands.CommandTree):
         return True
 
 
+PRESENCE_GUILD_ID = 1062740125475426404
+
+
 class NexusBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = NexusCommandTree(self)
         self.synced = False
 
+    async def update_presence(self):
+        try:
+            guild = self.get_guild(PRESENCE_GUILD_ID)
+            total = (guild.member_count or 0) if guild else 0
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f"{total} membres")
+            await self.change_presence(status=discord.Status.online, activity=activity)
+        except Exception as e:
+            logger.error(f"update_presence error: {e}")
+
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
         await log_to_db('info', f'Bot logged in as {self.user}')
 
-        streaming_activity = discord.Streaming(name="MssClick - Faction", url="https://twitch.tv/mssclick")
-        await self.change_presence(activity=streaming_activity)
+        await self.update_presence()
 
         if not self.synced:
             for guild in self.guilds:
@@ -994,6 +1007,7 @@ class NexusBot(discord.Client):
             logger.error(f"Error in unban protection: {e}")
 
     async def on_member_remove(self, member):
+        await self.update_presence()
         try:
             if pool:
                 row = await pool.fetchrow(
@@ -1088,6 +1102,7 @@ class NexusBot(discord.Client):
             logger.error(f"Error in webhook protection: {e}")
 
     async def on_member_join(self, member):
+        await self.update_presence()
         try:
             if pool:
                 row = await pool.fetchrow(
