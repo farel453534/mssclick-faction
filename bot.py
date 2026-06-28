@@ -293,6 +293,21 @@ async def init_db():
                 ON contrat_salon (public_message_id, mercenaire_id)
                 WHERE kind IN ('candidature', 'active');
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS contrat_ajout (
+                    req_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    guild_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    requested_by TEXT NOT NULL,
+                    author_id TEXT NOT NULL,
+                    mercenaire_id TEXT NOT NULL,
+                    anonyme BOOLEAN DEFAULT FALSE,
+                    merc_ok BOOLEAN DEFAULT FALSE,
+                    command_ok BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
             existing_keys = await conn.fetchval("SELECT COUNT(*) FROM license_keys")
             if existing_keys == 0:
                 import secrets as sec
@@ -519,6 +534,7 @@ class NexusBot(discord.Client):
             self.add_dynamic_items(
                 ContratCounterOfferButton, ContratNegoAcceptButton, ContratNegoCloseButton,
                 ContratValidateButton, ContratAddPersonButton, ContratCloseChannelButton)
+            self.add_dynamic_items(ContratAddValidateButton, ContratAddRejectButton)
         except Exception as e:
             logger.error(f"Failed to register contrat views: {e}")
         try:
@@ -6735,6 +6751,9 @@ CONTRAT_CREATOR_ROLE_IDS = [
 # Salon où sont publiés les contrats
 CONTRAT_PUBLISH_CHANNEL_ID = 1519461397598048367
 
+# Salon de logs des contrats (révèle les commanditaires anonymes au staff)
+CONTRAT_LOG_CHANNEL_ID = 1520578035806375956
+
 # Catégorie où sont créés les salons privés commanditaire/mercenaire
 CONTRAT_CATEGORY_ID = 1519459783042924555
 
@@ -6935,6 +6954,87 @@ async def contrat_salon_candidatures(public_message_id, mercenaire_id=None):
         return []
 
 
+async def contrat_ajout_add(req_id, channel_id, guild_id, target_id, requested_by,
+                            author_id, mercenaire_id, *, anonyme=False,
+                            merc_ok=False, command_ok=False):
+    if not pool:
+        return
+    try:
+        await pool.execute(
+            "INSERT INTO contrat_ajout "
+            "(req_id, channel_id, guild_id, target_id, requested_by, author_id, "
+            "mercenaire_id, anonyme, merc_ok, command_ok) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) "
+            "ON CONFLICT (req_id) DO NOTHING",
+            str(req_id), str(channel_id), str(guild_id), str(target_id),
+            str(requested_by), str(author_id), str(mercenaire_id),
+            bool(anonyme), bool(merc_ok), bool(command_ok))
+    except Exception as e:
+        logger.error(f"contrat_ajout_add error: {e}")
+
+
+async def contrat_ajout_get(req_id):
+    if not pool:
+        return None
+    try:
+        return await pool.fetchrow(
+            "SELECT * FROM contrat_ajout WHERE req_id = $1", str(req_id))
+    except Exception as e:
+        logger.error(f"contrat_ajout_get error: {e}")
+        return None
+
+
+async def contrat_ajout_set_ok(req_id, side):
+    if not pool:
+        return None
+    col = 'merc_ok' if side == 'merc' else 'command_ok'
+    try:
+        return await pool.fetchrow(
+            f"UPDATE contrat_ajout SET {col} = TRUE WHERE req_id = $1 RETURNING *",
+            str(req_id))
+    except Exception as e:
+        logger.error(f"contrat_ajout_set_ok error: {e}")
+        return None
+
+
+async def contrat_ajout_claim_if_ready(req_id):
+    """Supprime et renvoie la demande en une seule requête atomique, uniquement
+    si les deux validations sont présentes. Garantit qu'un seul appel finalise."""
+    if not pool:
+        return None
+    try:
+        return await pool.fetchrow(
+            "DELETE FROM contrat_ajout WHERE req_id = $1 "
+            "AND merc_ok AND command_ok RETURNING *", str(req_id))
+    except Exception as e:
+        logger.error(f"contrat_ajout_claim_if_ready error: {e}")
+        return None
+
+
+async def contrat_ajout_remove(req_id):
+    if not pool:
+        return
+    try:
+        await pool.execute(
+            "DELETE FROM contrat_ajout WHERE req_id = $1", str(req_id))
+    except Exception as e:
+        logger.error(f"contrat_ajout_remove error: {e}")
+
+
+async def _contrat_log(embed: discord.Embed, guild=None):
+    """Envoie un embed dans le salon de logs des contrats. Révèle notamment
+    l'identité réelle des commanditaires anonymes (réservé au staff)."""
+    try:
+        if guild is not None:
+            channel = guild.get_channel(CONTRAT_LOG_CHANNEL_ID)
+        else:
+            channel = await _contrat_resolve_channel(CONTRAT_LOG_CHANNEL_ID)
+        if channel is not None:
+            await channel.send(embed=embed)
+    except Exception as e:
+        logger.error(f"Contrat: log échoué : {e}")
+
+
 def build_contrat_embed(*, type_key, titre, recompense, objectif, conditions,
                         delai, commanditaire_id, statut, color, anonyme=False):
     t = CONTRAT_TYPES.get(type_key, {})
@@ -7014,6 +7114,25 @@ class ContratModal(discord.ui.Modal):
                 )
             await interaction.followup.send(confirm, ephemeral=True)
             await log_to_db('info', f'Contrat ({self._type_key}{" anonyme" if self._anonyme else ""}) publié par {interaction.user} dans {interaction.guild.name}')
+            log_embed = discord.Embed(
+                title="📄 Contrat publié",
+                color=0xE74C3C,
+                timestamp=datetime.datetime.utcnow(),
+            )
+            log_embed.add_field(
+                name="Créateur (réel)",
+                value=f"{interaction.user.mention} (`{interaction.user}` — `{interaction.user.id}`)",
+                inline=False)
+            log_embed.add_field(
+                name="Mode",
+                value="🕵️ Anonyme" if self._anonyme else "Public",
+                inline=True)
+            log_embed.add_field(
+                name="Type",
+                value=CONTRAT_TYPES.get(self._type_key, {}).get("label", self._type_key),
+                inline=True)
+            log_embed.add_field(name="Titre", value=self.titre.value or "—", inline=False)
+            await _contrat_log(log_embed, interaction.guild)
         except discord.Forbidden:
             await interaction.followup.send("❌ Le bot ne peut pas écrire dans le salon des contrats.", ephemeral=True)
         except Exception as e:
@@ -7304,6 +7423,27 @@ class ContratAcceptButton(
 
         try:
             await log_to_db('info', f'Contrat pris par {member} dans {interaction.guild.name}')
+        except Exception:
+            pass
+
+        try:
+            log_embed = discord.Embed(
+                title="🤝 Contrat pris en charge",
+                color=0xE67E22,
+                timestamp=datetime.datetime.utcnow(),
+            )
+            log_embed.add_field(name="Titre", value=titre, inline=False)
+            log_embed.add_field(
+                name="Commanditaire (réel)",
+                value=f"<@{self.author_id}> (`{self.author_id}`)"
+                + (" — 🕵️ anonyme" if is_anon else ""),
+                inline=False)
+            log_embed.add_field(
+                name="Mercenaire",
+                value=f"{member.mention} (`{member}` — `{member.id}`)",
+                inline=False)
+            log_embed.add_field(name="Salon", value=private_channel.mention, inline=False)
+            await _contrat_log(log_embed, guild)
         except Exception:
             pass
 
@@ -8086,6 +8226,59 @@ class ContratAddPersonButton(
         await interaction.response.send_modal(ContratAddPersonModal())
 
 
+async def _contrat_finalize_ajout(row):
+    """Accorde l'accès au salon une fois les deux validations obtenues."""
+    guild = bot.get_guild(int(row['guild_id']))
+    if guild is None:
+        return False, "Serveur introuvable."
+    channel = await _contrat_resolve_channel(int(row['channel_id']))
+    if channel is None:
+        return False, "Salon introuvable."
+    target = await _contrat_fetch_member(guild, int(row['target_id']))
+    if target is None:
+        return False, "Membre cible introuvable sur le serveur."
+    try:
+        await channel.set_permissions(
+            target,
+            view_channel=True, send_messages=True,
+            read_message_history=True, attach_files=True,
+            reason="Ajout au salon de contrat validé par les deux parties")
+    except discord.Forbidden:
+        return False, "Je n'ai pas la permission de modifier ce salon."
+    except Exception as e:
+        logger.error(f"Contrat: ajout personne échoué : {e}")
+        return False, "Impossible d'ajouter cette personne."
+    try:
+        await channel.send(
+            f"➕ {target.mention} a été ajouté au salon "
+            f"(validé par le mercenaire **et** le commanditaire).")
+    except Exception:
+        pass
+    try:
+        log_embed = discord.Embed(
+            title="➕ Personne ajoutée à un contrat",
+            color=0x2ECC71,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        log_embed.add_field(name="Salon", value=channel.mention, inline=False)
+        log_embed.add_field(
+            name="Personne ajoutée",
+            value=f"{target.mention} (`{target}` — `{target.id}`)", inline=False)
+        log_embed.add_field(
+            name="Commanditaire (réel)",
+            value=f"<@{row['author_id']}> (`{row['author_id']}`)"
+            + (" — 🕵️ anonyme" if row['anonyme'] else ""),
+            inline=False)
+        log_embed.add_field(
+            name="Mercenaire", value=f"<@{row['mercenaire_id']}>", inline=False)
+        log_embed.add_field(
+            name="Demandé par", value=f"<@{row['requested_by']}>", inline=True)
+        await _contrat_log(log_embed, guild)
+    except Exception:
+        pass
+    return True, target
+
+
 class ContratAddPersonModal(discord.ui.Modal, title="Ajouter une personne"):
     user_id = discord.ui.TextInput(
         label="ID Discord de la personne",
@@ -8100,39 +8293,221 @@ class ContratAddPersonModal(discord.ui.Modal, title="Ajouter une personne"):
             await interaction.followup.send(
                 "❌ Action possible uniquement dans le salon du contrat.", ephemeral=True)
             return
+        salon = await contrat_salon_get(channel.id)
+        if salon is None:
+            await interaction.followup.send(
+                "❌ Ce salon n'est pas un salon de contrat reconnu.", ephemeral=True)
+            return
+        author_id = int(salon['author_id'])
+        mercenaire_id = int(salon['mercenaire_id'])
+        anonyme = bool(salon['anonyme'])
+
         raw = (self.user_id.value or "").strip().strip("<@!>").strip()
         if not raw.isdigit():
             await interaction.followup.send(
                 "❌ ID Discord invalide. Donne uniquement l'identifiant numérique.",
                 ephemeral=True)
             return
-        target = await _contrat_fetch_member(guild, int(raw))
+        target_id = int(raw)
+
+        if target_id == author_id:
+            await interaction.followup.send(
+                "❌ Le commanditaire ne peut pas être ajouté à son propre contrat"
+                + (" (cela révélerait son identité anonyme)." if anonyme else "."),
+                ephemeral=True)
+            return
+        if target_id == mercenaire_id:
+            await interaction.followup.send(
+                "❌ Le mercenaire fait déjà partie du salon.", ephemeral=True)
+            return
+        if target_id == interaction.user.id:
+            await interaction.followup.send(
+                "❌ Tu fais déjà partie du salon.", ephemeral=True)
+            return
+
+        target = await _contrat_fetch_member(guild, target_id)
         if target is None:
             await interaction.followup.send(
                 "❌ Aucun membre trouvé avec cet ID sur le serveur.", ephemeral=True)
             return
-        try:
-            await channel.set_permissions(
-                target,
-                view_channel=True, send_messages=True,
-                read_message_history=True, attach_files=True,
-                reason=f"Ajout au salon de contrat par {interaction.user}")
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "❌ Je n'ai pas la permission de modifier ce salon.", ephemeral=True)
+
+        merc_ok = interaction.user.id == mercenaire_id
+        command_ok = interaction.user.id == author_id
+        req_id = str(interaction.id)
+        await contrat_ajout_add(
+            req_id, channel.id, guild.id, target_id, interaction.user.id,
+            author_id, mercenaire_id,
+            anonyme=anonyme, merc_ok=merc_ok, command_ok=command_ok)
+
+        if merc_ok and command_ok:
+            claimed = await contrat_ajout_claim_if_ready(req_id)
+            if claimed is None:
+                await contrat_ajout_remove(req_id)
+                await interaction.followup.send(
+                    "❌ Demande introuvable.", ephemeral=True)
+                return
+            ok, res = await _contrat_finalize_ajout(claimed)
+            if ok:
+                await interaction.followup.send(
+                    f"✅ {target.mention} a été ajouté au salon.", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ {res}", ephemeral=True)
             return
+
+        def _state():
+            return (
+                ("✅" if merc_ok else "⏳") + " Mercenaire   "
+                + ("✅" if command_ok else "⏳") + " Commanditaire")
+
+        view = discord.ui.View(timeout=None)
+        view.add_item(ContratAddValidateButton(req_id))
+        view.add_item(ContratAddRejectButton(req_id))
+        embed = discord.Embed(
+            title="➕ Demande d'ajout — double validation requise",
+            description=(
+                f"{interaction.user.mention} souhaite ajouter {target.mention} à ce salon.\n\n"
+                "L'ajout doit être validé par **le mercenaire et le commanditaire**.\n\n"
+                f"**État :** {_state()}"),
+            color=0xF1C40F,
+            timestamp=datetime.datetime.utcnow(),
+        )
+        try:
+            await channel.send(embed=embed, view=view)
         except Exception as e:
-            logger.error(f"Contrat: ajout personne échoué : {e}")
-            await interaction.followup.send(
-                "❌ Impossible d'ajouter cette personne.", ephemeral=True)
-            return
-        try:
-            await channel.send(
-                f"➕ {target.mention} a été ajouté au salon par {interaction.user.mention}.")
-        except Exception:
-            pass
+            logger.error(f"Contrat: message validation ajout échoué : {e}")
+
+        if not command_ok:
+            if anonyme:
+                commanditaire = await _contrat_fetch_member(guild, author_id)
+                if commanditaire is None:
+                    try:
+                        commanditaire = await bot.fetch_user(author_id)
+                    except Exception:
+                        commanditaire = None
+                dm_view = discord.ui.View(timeout=None)
+                dm_view.add_item(ContratAddValidateButton(req_id))
+                dm_view.add_item(ContratAddRejectButton(req_id))
+                dm_embed = discord.Embed(
+                    title="➕ Validation d'ajout à ton contrat anonyme",
+                    description=(
+                        f"Le mercenaire souhaite ajouter **{target}** au salon privé "
+                        f"de ton contrat **{salon.get('kind', 'contrat')}**.\n\n"
+                        "Ton identité reste anonyme. Valides-tu cet ajout ?"),
+                    color=0xF1C40F,
+                )
+                sent = await _contrat_send_dm(commanditaire, dm_embed, dm_view)
+                if not sent:
+                    await interaction.followup.send(
+                        "⚠️ Demande créée, mais je n'ai pas pu écrire au commanditaire "
+                        "en MP (MP fermés). Il devra valider autrement.", ephemeral=True)
+                    await interaction.followup.send(
+                        f"⏳ En attente de la validation du commanditaire pour ajouter "
+                        f"{target.mention}.", ephemeral=True)
+                    return
+
         await interaction.followup.send(
-            f"✅ {target.mention} a été ajouté au salon.", ephemeral=True)
+            f"⏳ Demande enregistrée. {target.mention} sera ajouté une fois "
+            "le mercenaire **et** le commanditaire d'accord.", ephemeral=True)
+
+
+class ContratAddValidateButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_addv:(?P<req>\d+)'
+):
+    def __init__(self, req_id):
+        self.req_id = str(req_id)
+        super().__init__(discord.ui.Button(
+            label="Valider l'ajout",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            custom_id=f"contrat_addv:{req_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(match['req'])
+
+    async def callback(self, interaction: discord.Interaction):
+        row = await contrat_ajout_get(self.req_id)
+        if row is None:
+            await interaction.response.send_message(
+                "ℹ️ Cette demande n'est plus active.", ephemeral=True)
+            return
+        uid = interaction.user.id
+        if uid == int(row['mercenaire_id']):
+            side = 'merc'
+        elif uid == int(row['author_id']):
+            side = 'command'
+        else:
+            await interaction.response.send_message(
+                "❌ Seuls le mercenaire et le commanditaire concernés peuvent valider.",
+                ephemeral=True)
+            return
+        updated = await contrat_ajout_set_ok(self.req_id, side)
+        if updated is None:
+            await interaction.response.send_message(
+                "❌ Erreur lors de l'enregistrement de la validation.", ephemeral=True)
+            return
+        if updated['merc_ok'] and updated['command_ok']:
+            claimed = await contrat_ajout_claim_if_ready(self.req_id)
+            if claimed is None:
+                await interaction.response.send_message(
+                    "ℹ️ Cette demande a déjà été finalisée.", ephemeral=True)
+                return
+            ok, res = await _contrat_finalize_ajout(claimed)
+            if ok:
+                await interaction.response.send_message(
+                    "✅ Validation complète. La personne a été ajoutée au salon.",
+                    ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ {res}", ephemeral=True)
+            return
+        manque = "commanditaire" if updated['merc_ok'] else "mercenaire"
+        await interaction.response.send_message(
+            f"✅ Validation enregistrée. En attente de la validation du **{manque}**.",
+            ephemeral=True)
+
+
+class ContratAddRejectButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r'contrat_addr:(?P<req>\d+)'
+):
+    def __init__(self, req_id):
+        self.req_id = str(req_id)
+        super().__init__(discord.ui.Button(
+            label="Refuser",
+            style=discord.ButtonStyle.danger,
+            emoji="✖️",
+            custom_id=f"contrat_addr:{req_id}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(match['req'])
+
+    async def callback(self, interaction: discord.Interaction):
+        row = await contrat_ajout_get(self.req_id)
+        if row is None:
+            await interaction.response.send_message(
+                "ℹ️ Cette demande n'est plus active.", ephemeral=True)
+            return
+        uid = interaction.user.id
+        mp = getattr(interaction.user, 'guild_permissions', None)
+        if uid not in (int(row['mercenaire_id']), int(row['author_id'])) and not (
+                mp is not None and mp.manage_channels):
+            await interaction.response.send_message(
+                "❌ Seuls le mercenaire et le commanditaire concernés peuvent refuser.",
+                ephemeral=True)
+            return
+        await contrat_ajout_remove(self.req_id)
+        channel = await _contrat_resolve_channel(int(row['channel_id']))
+        if channel is not None:
+            try:
+                await channel.send("✖️ Une demande d'ajout de personne a été refusée.")
+            except Exception:
+                pass
+        await interaction.response.send_message(
+            "✖️ Demande d'ajout refusée.", ephemeral=True)
 
 
 class ContratCloseChannelButton(
